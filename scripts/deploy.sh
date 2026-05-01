@@ -47,9 +47,14 @@ fail() { printf '\033[1;31m[deploy]\033[0m %s\n' "$*" >&2; exit 1; }
 resolve_bin() {
     local name="$1"; shift
     local found=""
+
+    # 1. Standard PATH lookup
     if command -v "$name" >/dev/null 2>&1; then
         found="$(command -v "$name")"
-    else
+    fi
+
+    # 2. Probe explicit candidate paths
+    if [[ -z "$found" ]]; then
         for candidate in "$@"; do
             if [[ -x "$candidate" ]]; then
                 found="$candidate"
@@ -57,17 +62,30 @@ resolve_bin() {
             fi
         done
     fi
+
+    # 3. Windows-native fallback: where.exe finds binaries on the Windows PATH
+    #    regardless of which bash flavour we're in (Git Bash / MSYS2 / WSL).
+    #    Strip CR, convert backslashes to forward slashes.
+    if [[ -z "$found" ]] && command -v where.exe >/dev/null 2>&1; then
+        local win_path
+        win_path="$(where.exe "$name" 2>/dev/null | head -1 | tr -d '\r')"
+        if [[ -n "$win_path" ]]; then
+            found="${win_path//\\//}"
+        fi
+    fi
+
     printf '%s' "$found"
 }
 
+_HOME="${HOME:-}"
 RPCTL=$(resolve_bin runpodctl \
-    "$HOME/.local/bin/runpodctl.exe" \
-    "$HOME/.local/bin/runpodctl" \
+    "${_HOME}/.local/bin/runpodctl.exe" \
+    "${_HOME}/.local/bin/runpodctl" \
     "/c/Users/${USERNAME:-}/.local/bin/runpodctl.exe")
-[[ -n "${RPCTL}" ]] || fail "runpodctl not on PATH and not at \$HOME/.local/bin. Install or extend PATH."
+[[ -n "${RPCTL}" ]] || fail "runpodctl not on PATH and not at \$HOME/.local/bin or via where.exe. Install or extend PATH."
 
 JQ=$(resolve_bin jq \
-    "$HOME/.local/bin/jq.exe" \
+    "${_HOME}/.local/bin/jq.exe" \
     "/c/Program Files/jq/jq.exe" \
     "/c/ProgramData/chocolatey/bin/jq.exe")
 [[ -n "${JQ}" ]] || fail "jq not on PATH. Install: winget install jqlang.jq  (then open a fresh shell)"
