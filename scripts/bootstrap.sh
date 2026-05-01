@@ -72,6 +72,15 @@ log "Accepting conda channel ToS (idempotent)"
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r    2>/dev/null || true
 
+# Install + use libmamba solver. The classic solver can't resolve nvidia's
+# cuda channel alongside conda-forge gcc=13.3.0. libmamba handles it cleanly.
+# Idempotent — won't reinstall if already configured.
+if ! conda config --show solver 2>/dev/null | grep -q libmamba; then
+    log "Installing libmamba solver in base env"
+    conda install -n base -y -c conda-forge conda-libmamba-solver 2>&1 | tail -3
+    conda config --set solver libmamba
+fi
+
 # ─────────────────────────────────────────────────────────────
 # Step 2: conda env (once, on volume)
 # ─────────────────────────────────────────────────────────────
