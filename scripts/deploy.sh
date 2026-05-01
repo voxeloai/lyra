@@ -63,7 +63,7 @@ resolve_bin() {
 RPCTL=$(resolve_bin runpodctl \
     "$HOME/.local/bin/runpodctl.exe" \
     "$HOME/.local/bin/runpodctl" \
-    "/c/Users/$USERNAME/.local/bin/runpodctl.exe")
+    "/c/Users/${USERNAME:-}/.local/bin/runpodctl.exe")
 [[ -n "${RPCTL}" ]] || fail "runpodctl not on PATH and not at \$HOME/.local/bin. Install or extend PATH."
 
 JQ=$(resolve_bin jq \
