@@ -41,39 +41,67 @@ warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m[deploy]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ─────────────────────────────────────────────────────────────
-# Pre-flight checks
+# Resolve binaries — Git Bash on Windows often doesn't inherit the same
+# PATH PowerShell sees, so probe common locations after `command -v` fails.
 # ─────────────────────────────────────────────────────────────
-command -v runpodctl >/dev/null 2>&1 || fail "runpodctl not on PATH"
-command -v jq >/dev/null 2>&1 || fail "jq not on PATH (needed for parsing runpodctl output)"
+resolve_bin() {
+    local name="$1"; shift
+    local found=""
+    if command -v "$name" >/dev/null 2>&1; then
+        found="$(command -v "$name")"
+    else
+        for candidate in "$@"; do
+            if [[ -x "$candidate" ]]; then
+                found="$candidate"
+                break
+            fi
+        done
+    fi
+    printf '%s' "$found"
+}
 
-# Auth: env var OR cached config
+RPCTL=$(resolve_bin runpodctl \
+    "$HOME/.local/bin/runpodctl.exe" \
+    "$HOME/.local/bin/runpodctl" \
+    "/c/Users/$USERNAME/.local/bin/runpodctl.exe")
+[[ -n "${RPCTL}" ]] || fail "runpodctl not on PATH and not at \$HOME/.local/bin. Install or extend PATH."
+
+JQ=$(resolve_bin jq \
+    "$HOME/.local/bin/jq.exe" \
+    "/c/Program Files/jq/jq.exe" \
+    "/c/ProgramData/chocolatey/bin/jq.exe")
+[[ -n "${JQ}" ]] || fail "jq not on PATH. Install: winget install jqlang.jq  (then open a fresh shell)"
+
+log "Using runpodctl: ${RPCTL}"
+log "Using jq:        ${JQ}"
+
+# ─────────────────────────────────────────────────────────────
+# Auth + secret pre-flight
+# ─────────────────────────────────────────────────────────────
 if [[ -z "${RUNPOD_API_KEY:-}" ]]; then
-    if ! runpodctl user 2>/dev/null | grep -q '"id"'; then
+    if ! "${RPCTL}" user 2>/dev/null | grep -q '"id"'; then
         fail "RUNPOD_API_KEY not set and no cached config. Run: runpodctl doctor"
     fi
 fi
 
-# HF_TOKEN required for the pod to download nvidia/Lyra-2.0
 if [[ -z "${HF_TOKEN:-}" ]]; then
     fail "HF_TOKEN not set. export HF_TOKEN=hf_... in your shell, then re-run."
 fi
 
 log "Account check"
-runpodctl user 2>&1 | jq -r '"  user: \(.email // .id // "unknown")  balance: \(.spendLimit // "?" )"'
+"${RPCTL}" user 2>&1 | "${JQ}" -r '"  user: \(.email // .id // "unknown")  balance: \(.spendLimit // "?" )"' || true
 
 # ─────────────────────────────────────────────────────────────
 # Pick a data center with H100 stock
 # ─────────────────────────────────────────────────────────────
 if [[ "${DATA_CENTER_ID}" = "auto" ]]; then
-    log "Discovering datacenter with H100 SXM 80GB stock"
-    # GPU availability is per-DC; runpodctl gpu list shows it.
-    # Fallback: try a sensible ordered list.
-    DC_CANDIDATES=$(runpodctl gpu list -o json 2>/dev/null \
-        | jq -r --arg gpu "$GPU_ID" \
+    log "Discovering datacenter with stock for: ${GPU_ID}"
+    DC_CANDIDATES=$("${RPCTL}" gpu list -o json 2>/dev/null \
+        | "${JQ}" -r --arg gpu "$GPU_ID" \
             '[.[] | select(.id == $gpu) | .dataCenters[]?.id] | unique | .[]' \
         | head -10)
     if [[ -z "${DC_CANDIDATES}" ]]; then
-        warn "Could not auto-discover a DC. Falling back to common candidates."
+        warn "Could not auto-discover a DC for '${GPU_ID}'. Falling back to common candidates."
         DC_CANDIDATES=$'EU-RO-1\nUS-KS-2\nEU-CZ-1\nUS-CA-2'
     fi
     log "Candidate DCs: $(echo "${DC_CANDIDATES}" | tr '\n' ' ')"
@@ -85,8 +113,8 @@ log "Using DATA_CENTER_ID=${DATA_CENTER_ID}"
 # Network volume — create if missing, reuse if present
 # ─────────────────────────────────────────────────────────────
 log "Looking for existing volume named '${VOLUME_NAME}'"
-EXISTING_VOLUME=$(runpodctl network-volume list -o json 2>/dev/null \
-    | jq -r --arg name "$VOLUME_NAME" \
+EXISTING_VOLUME=$("${RPCTL}" network-volume list -o json 2>/dev/null \
+    | "${JQ}" -r --arg name "$VOLUME_NAME" \
         '[.[] | select(.name == $name)] | first.id // empty')
 
 if [[ -n "${EXISTING_VOLUME}" ]]; then
@@ -94,34 +122,32 @@ if [[ -n "${EXISTING_VOLUME}" ]]; then
     log "Reusing existing volume: ${VOLUME_ID}"
 else
     log "Creating volume: name=${VOLUME_NAME} size=${VOLUME_SIZE_GB}GB dc=${DATA_CENTER_ID}"
-    CREATE_OUT=$(runpodctl network-volume create \
+    CREATE_OUT=$("${RPCTL}" network-volume create \
         --name "${VOLUME_NAME}" \
         --size "${VOLUME_SIZE_GB}" \
         --data-center-id "${DATA_CENTER_ID}" \
         -o json 2>&1)
-    VOLUME_ID=$(echo "${CREATE_OUT}" | jq -r '.id // empty')
+    VOLUME_ID=$(echo "${CREATE_OUT}" | "${JQ}" -r '.id // empty')
     [[ -n "${VOLUME_ID}" ]] || fail "Volume create failed: ${CREATE_OUT}"
     log "Created volume: ${VOLUME_ID}"
 fi
 
 # ─────────────────────────────────────────────────────────────
-# Pod — refuse to create dup; report if pod already exists by name
+# Pod — refuse to create dup
 # ─────────────────────────────────────────────────────────────
-EXISTING_POD=$(runpodctl pod list -o json 2>/dev/null \
-    | jq -r --arg name "$POD_NAME" \
-        '[.[] | select(.name == $name)] | first | "\(.id // empty) \(.desiredStatus // "?")"')
-if [[ -n "${EXISTING_POD% *}" ]]; then
-    warn "Pod named '${POD_NAME}' already exists: ${EXISTING_POD}"
-    warn "Refusing to create a duplicate. Stop or rename that pod, or set POD_NAME=other."
+EXISTING_POD=$("${RPCTL}" pod list -o json 2>/dev/null \
+    | "${JQ}" -r --arg name "$POD_NAME" \
+        '[.[] | select(.name == $name)] | first.id // empty')
+if [[ -n "${EXISTING_POD}" ]]; then
+    warn "Pod named '${POD_NAME}' already exists (id=${EXISTING_POD})."
+    warn "Refusing to create a duplicate. Stop/rename it, or set POD_NAME=other."
     exit 0
 fi
 
-# ─────────────────────────────────────────────────────────────
-# Build the env JSON without exposing the value to logs
-# ─────────────────────────────────────────────────────────────
-# jq builds the JSON so quoting/escaping is correct. HF_TOKEN value never
-# echoed; only its presence is asserted by the pre-flight check.
-ENV_JSON=$(jq -nc --arg t "$HF_TOKEN" '{HF_TOKEN: $t, PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"}')
+# Build the env JSON with jq so escaping is correct. The HF_TOKEN value
+# is never echoed; we only assert its presence above.
+ENV_JSON=$("${JQ}" -nc --arg t "$HF_TOKEN" \
+    '{HF_TOKEN: $t, PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"}')
 
 # ─────────────────────────────────────────────────────────────
 # Create the pod
@@ -130,7 +156,7 @@ log "Creating pod: name=${POD_NAME} gpu=${GPU_ID} x${GPU_COUNT} dc=${DATA_CENTER
 log "  image=${POD_IMAGE}"
 log "  volume=${VOLUME_ID} mount=/workspace size=${VOLUME_SIZE_GB}GB"
 
-POD_OUT=$(runpodctl pod create \
+POD_OUT=$("${RPCTL}" pod create \
     --name "${POD_NAME}" \
     --cloud-type "${CLOUD_TYPE}" \
     --gpu-id "${GPU_ID}" \
@@ -145,15 +171,14 @@ POD_OUT=$(runpodctl pod create \
     --ports "22/tcp" \
     -o json 2>&1)
 
-POD_ID=$(echo "${POD_OUT}" | jq -r '.id // empty')
+POD_ID=$(echo "${POD_OUT}" | "${JQ}" -r '.id // empty')
 [[ -n "${POD_ID}" ]] || fail "Pod create failed: ${POD_OUT}"
 
 log "Pod created: ${POD_ID}"
 log "Waiting for pod to enter RUNNING status..."
 
-# Poll until running (or timeout after ~3 min)
 for _ in $(seq 1 18); do
-    STATUS=$(runpodctl pod get "${POD_ID}" -o json 2>/dev/null | jq -r '.desiredStatus // "?"')
+    STATUS=$("${RPCTL}" pod get "${POD_ID}" -o json 2>/dev/null | "${JQ}" -r '.desiredStatus // "?"')
     if [[ "${STATUS}" = "RUNNING" ]]; then break; fi
     sleep 10
 done
@@ -161,16 +186,15 @@ done
 # ─────────────────────────────────────────────────────────────
 # Print connection info
 # ─────────────────────────────────────────────────────────────
-POD_INFO=$(runpodctl pod get "${POD_ID}" -o json 2>/dev/null)
-SSH_HOST=$(echo "${POD_INFO}" | jq -r '.machine.podHostId // .runtime.gpus[0]?.id // empty')
-PUBLIC_IP=$(echo "${POD_INFO}" | jq -r '.runtime.ports[]? | select(.privatePort==22) | .ip // empty' | head -1)
-PUBLIC_PORT=$(echo "${POD_INFO}" | jq -r '.runtime.ports[]? | select(.privatePort==22) | .publicPort // empty' | head -1)
+POD_INFO=$("${RPCTL}" pod get "${POD_ID}" -o json 2>/dev/null)
+PUBLIC_IP=$(echo "${POD_INFO}"   | "${JQ}" -r '.runtime.ports[]? | select(.privatePort==22) | .ip         // empty' | head -1)
+PUBLIC_PORT=$(echo "${POD_INFO}" | "${JQ}" -r '.runtime.ports[]? | select(.privatePort==22) | .publicPort // empty' | head -1)
 
 cat <<EOF
 
 [deploy] DONE
   pod id:     ${POD_ID}
-  status:     $(echo "${POD_INFO}" | jq -r '.desiredStatus // "?"')
+  status:     $(echo "${POD_INFO}" | "${JQ}" -r '.desiredStatus // "?"')
   volume id:  ${VOLUME_ID}
 
 SSH:
