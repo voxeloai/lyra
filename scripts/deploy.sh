@@ -97,8 +97,16 @@ log "Using jq:        ${JQ}"
 # Auth + secret pre-flight
 # ─────────────────────────────────────────────────────────────
 if [[ -z "${RUNPOD_API_KEY:-}" ]]; then
-    if ! "${RPCTL}" user 2>/dev/null | grep -q '"id"'; then
-        fail "RUNPOD_API_KEY not set and no cached config. Run: runpodctl doctor"
+    USER_OUT=$("${RPCTL}" user 2>&1) || true
+    if echo "${USER_OUT}" | grep -q '"error"'; then
+        warn "runpodctl user returned an error:"
+        printf '%s\n' "${USER_OUT}" | sed 's/^/  | /'
+        fail "Auth check failed. Run: runpodctl doctor (paste your API key when prompted), then re-run this script."
+    fi
+    if ! echo "${USER_OUT}" | grep -qE '"(id|email|userId|user_id)"'; then
+        warn "runpodctl user did not return recognisable account JSON. Output was:"
+        printf '%s\n' "${USER_OUT}" | sed 's/^/  | /'
+        fail "Auth check failed. If runpodctl user works for you directly, paste its output and we'll widen the regex."
     fi
 fi
 
