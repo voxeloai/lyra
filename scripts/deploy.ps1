@@ -88,31 +88,9 @@ if (-not $env:RUNPOD_API_KEY) {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Pick a data center with H100 stock
-# ─────────────────────────────────────────────────────────────
-if ($DataCenter -eq 'auto') {
-    Log "Discovering datacenter for GPU '$GpuId'"
-    try {
-        $gpuList = (runpodctl gpu list -o json 2>$null) | ConvertFrom-Json
-        $matchingGpu = $gpuList | Where-Object { $_.id -eq $GpuId } | Select-Object -First 1
-        $candidates = @()
-        if ($matchingGpu -and $matchingGpu.dataCenters) {
-            $candidates = @($matchingGpu.dataCenters | ForEach-Object { $_.id } | Sort-Object -Unique)
-        }
-    } catch {
-        $candidates = @()
-    }
-    if (-not $candidates -or $candidates.Count -eq 0) {
-        Warn "Could not auto-discover. Trying common candidates."
-        $candidates = @('EU-RO-1','US-KS-2','EU-CZ-1','US-CA-2')
-    }
-    Log "Candidate DCs: $($candidates -join ', ')"
-    $DataCenter = $candidates[0]
-}
-Log "Using DATA_CENTER_ID=$DataCenter"
-
-# ─────────────────────────────────────────────────────────────
-# Network volume — reuse or create
+# Network volume — reuse or create. We check this FIRST because if a volume
+# already exists, the pod must run in the volume's datacenter — that overrides
+# any auto-discovery.
 # ─────────────────────────────────────────────────────────────
 Log "Looking for existing volume named '$VolumeName'"
 $volumeList = @()
@@ -121,10 +99,98 @@ try {
 } catch { $volumeList = @() }
 
 $existingVolume = $volumeList | Where-Object { $_.name -eq $VolumeName } | Select-Object -First 1
+$VolumeId = $null
+
 if ($existingVolume) {
     $VolumeId = $existingVolume.id
-    Log "Reusing volume: $VolumeId"
-} else {
+    # Volume is pinned to its datacenter — the pod MUST run in the same one.
+    $existingDc = $existingVolume.dataCenterId
+    if (-not $existingDc) { $existingDc = $existingVolume.dataCenter }
+    if (-not $existingDc) { $existingDc = $existingVolume.location }
+    if ($existingDc) {
+        if ($DataCenter -ne 'auto' -and $DataCenter -ne $existingDc) {
+            Warn "You requested -DataCenter $DataCenter but the existing volume '$VolumeName' lives in $existingDc."
+            Warn "Network volumes can't move datacenters. Either delete the volume and re-run, or rename the new pod via -PodName <other> + use a different VolumeName."
+            Die "DC mismatch."
+        }
+        $DataCenter = $existingDc
+        Log "Reusing volume: $VolumeId (locked to DC: $DataCenter)"
+    } else {
+        Log "Reusing volume: $VolumeId  (DC could not be read from JSON; may need manual confirm)"
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# Pick a data center with stock — only if we're creating a fresh volume.
+# Print candidates with whatever availability fields the JSON gives us, so
+# the choice is transparent and we can re-run with -DataCenter if needed.
+# ─────────────────────────────────────────────────────────────
+function Show-DcCandidates {
+    param([array] $DataCenters)
+    foreach ($d in $DataCenters) {
+        $bits = @("id=$($d.id)")
+        if ($null -ne $d.available)        { $bits += "available=$($d.available)" }
+        if ($null -ne $d.availability)     { $bits += "availability=$($d.availability)" }
+        if ($null -ne $d.stock)            { $bits += "stock=$($d.stock)" }
+        if ($null -ne $d.gpuAvailability)  { $bits += "gpuAvailability=$($d.gpuAvailability)" }
+        if ($null -ne $d.location)         { $bits += "location=$($d.location)" }
+        Log "  - $($bits -join '  ')"
+    }
+}
+
+if ($DataCenter -eq 'auto') {
+    # Confirm the GPU type is generally available globally.
+    Log "Checking global availability for GPU '$GpuId'"
+    $g = $null
+    try {
+        $gpuList = @((runpodctl gpu list -o json 2>$null) | ConvertFrom-Json)
+        $g = $gpuList | Where-Object { $_.gpuId -eq $GpuId } | Select-Object -First 1
+    } catch {}
+    if ($g) {
+        Log ("  {0}  available={1}  stockStatus={2}  secure={3}  community={4}" -f $g.displayName, $g.available, $g.stockStatus, $g.secureCloud, $g.communityCloud)
+        if (-not $g.available) { Warn "Reported globally unavailable. Pod create may fail." }
+    } else {
+        Warn "'$GpuId' not in runpodctl gpu list. Verify the exact id with: runpodctl gpu list"
+    }
+
+    # Walk datacenter list. Each DC has a gpuAvailability[] of { gpuId, stockStatus }.
+    Log "Scanning datacenters for stock"
+    $dcList = @()
+    try { $dcList = @((runpodctl datacenter list -o json 2>$null) | ConvertFrom-Json) } catch {}
+
+    $rank = @{ 'High' = 1; 'Medium' = 2; 'Low' = 3 }   # lower number sorts first
+    $candidates = @()
+    foreach ($dc in $dcList) {
+        if (-not $dc.gpuAvailability) { continue }
+        $entry = $dc.gpuAvailability | Where-Object { $_.gpuId -eq $GpuId } | Select-Object -First 1
+        if (-not $entry) { continue }
+        $status = $entry.stockStatus
+        if ([string]::IsNullOrWhiteSpace($status)) { continue }   # empty = no stock
+        if ($status -eq 'Unavailable') { continue }
+        $candidates += [PSCustomObject]@{
+            Id       = $dc.id
+            Location = $dc.location
+            Stock    = $status
+            SortKey  = if ($rank.ContainsKey($status)) { $rank[$status] } else { 99 }
+        }
+    }
+
+    if ($candidates.Count -eq 0) {
+        Warn "No datacenter is currently reporting stock for '$GpuId'."
+        Warn "Run with -DataCenter <id> to override. Falling back to EU-RO-1."
+        $DataCenter = 'EU-RO-1'
+    } else {
+        $sorted = $candidates | Sort-Object SortKey, Id
+        Log "Candidate DCs (sorted High > Medium > Low):"
+        foreach ($c in $sorted) { Log ("  - {0,-10}  loc={1,-15}  stock={2}" -f $c.Id, $c.Location, $c.Stock) }
+        $DataCenter = $sorted[0].Id
+        Log "Picked: $DataCenter ($($sorted[0].Stock) stock)"
+    }
+}
+Log "Using DATA_CENTER_ID=$DataCenter"
+
+# Now create the volume if we didn't already find one
+if (-not $VolumeId) {
     Log "Creating volume: name=$VolumeName size=${VolumeSizeGB}GB dc=$DataCenter"
     $createOut = (runpodctl network-volume create `
         --name $VolumeName `
