@@ -65,24 +65,35 @@ resolve_bin() {
 
     # 3. Windows-native fallback: where.exe finds binaries on the Windows PATH
     #    regardless of which bash flavour we're in (Git Bash / MSYS2 / WSL).
-    #    Convert "C:\foo\bar.exe" → "/c/foo/bar.exe" so bash can execute it.
+    #    Different bashes mount Windows drives differently:
+    #      Git Bash / MSYS2 → /c/Users/...
+    #      WSL              → /mnt/c/Users/...
+    #    Try the native translator first (wslpath on WSL, cygpath on MSYS),
+    #    then probe both POSIX forms manually.
     if [[ -z "$found" ]] && command -v where.exe >/dev/null 2>&1; then
         local win_path
         win_path="$(where.exe "$name" 2>/dev/null | head -1 | tr -d '\r')"
         if [[ -n "$win_path" ]]; then
-            # Prefer cygpath if available — it handles edge cases properly.
-            if command -v cygpath >/dev/null 2>&1; then
-                found="$(cygpath -u "$win_path" 2>/dev/null || true)"
+            local converted=""
+            if command -v wslpath >/dev/null 2>&1; then
+                converted="$(wslpath -u "$win_path" 2>/dev/null || true)"
+            elif command -v cygpath >/dev/null 2>&1; then
+                converted="$(cygpath -u "$win_path" 2>/dev/null || true)"
             fi
-            # Manual fallback if cygpath isn't there or returned nothing.
-            if [[ -z "$found" || ! -x "$found" ]]; then
+            if [[ -n "$converted" && -x "$converted" ]]; then
+                found="$converted"
+            else
                 local p="${win_path//\\//}"
                 if [[ "$p" =~ ^([A-Za-z]):(.*)$ ]]; then
                     local drive
                     drive=$(echo "${BASH_REMATCH[1]}" | tr 'A-Z' 'a-z')
-                    found="/${drive}${BASH_REMATCH[2]}"
-                else
-                    found="$p"
+                    if [[ -x "/${drive}${BASH_REMATCH[2]}" ]]; then
+                        found="/${drive}${BASH_REMATCH[2]}"
+                    elif [[ -x "/mnt/${drive}${BASH_REMATCH[2]}" ]]; then
+                        found="/mnt/${drive}${BASH_REMATCH[2]}"
+                    else
+                        found="$p"
+                    fi
                 fi
             fi
         fi
