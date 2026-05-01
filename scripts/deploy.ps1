@@ -40,12 +40,19 @@ param(
     [string] $CloudType      = $(if ($env:CLOUD_TYPE)      { $env:CLOUD_TYPE }      else { 'SECURE' })
 )
 
-$ErrorActionPreference = 'Stop'
+# IMPORTANT: keep at 'Continue' so native commands (runpodctl) writing to
+# stderr don't terminate the script. We capture stderr via 2>&1 and inspect
+# the output ourselves; explicit `Die` calls handle real failures.
+$ErrorActionPreference = 'Continue'
+
+# In PS 7.3+, native command errors are wrapped as PowerShell errors that
+# respect $ErrorActionPreference unless this is set to $false.
+try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
 
 # Force consistent native-arg passing across PS 5.1 and 7+. In Legacy mode
 # (the default), internal double quotes are stripped when calling .exe files
 # unless they are backslash-escaped. We escape the env JSON below to survive
-# this. Setting this here makes the script behave the same regardless of host.
+# this.
 try { $PSNativeCommandArgumentPassing = 'Legacy' } catch {}
 
 function Log  { param($Msg) Write-Host "[deploy] $Msg" -ForegroundColor Cyan }
@@ -147,22 +154,9 @@ $VolumeSupportedDCs = @(
 )
 
 if ($DataCenter -eq 'auto') {
-    # Confirm the GPU type is globally available.
-    Log "Checking global availability for GPU '$GpuId'"
-    $g = $null
-    try {
-        $gpuList = @((runpodctl gpu list -o json 2>$null) | ConvertFrom-Json)
-        $g = $gpuList | Where-Object { $_.gpuId -eq $GpuId } | Select-Object -First 1
-    } catch {}
-    if ($g) {
-        Log ("  {0}  available={1}  stockStatus={2}  secure={3}  community={4}" -f $g.displayName, $g.available, $g.stockStatus, $g.secureCloud, $g.communityCloud)
-        if (-not $g.available) { Warn "Reported globally unavailable. Pod create may fail." }
-    } else {
-        Warn "'$GpuId' not in runpodctl gpu list. Verify with: runpodctl gpu list"
-    }
-
     # Walk datacenter list. Each DC has gpuAvailability[] of { gpuId, stockStatus }.
-    Log "Scanning datacenters for stock"
+    # The DC scan is the source of truth; we don't pre-check gpu list.
+    Log "Scanning datacenters for stock of '$GpuId'"
     $dcList = @()
     try { $dcList = @((runpodctl datacenter list -o json 2>$null) | ConvertFrom-Json) } catch {}
 
