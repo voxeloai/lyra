@@ -138,8 +138,16 @@ function Show-DcCandidates {
     }
 }
 
+# Datacenters that currently support network volumes. RunPod's error message
+# revealed this list 2026-05-01; if RunPod expands volume support, edit here.
+$VolumeSupportedDCs = @(
+    'AP-JP-1','CA-MTL-3','CA-MTL-4','EU-CZ-1','EU-NL-1','EU-RO-1','EU-SE-1',
+    'EUR-IS-1','EUR-IS-3','EUR-NO-1','US-CA-2','US-GA-2','US-IL-1','US-KS-2',
+    'US-MO-1','US-MO-2','US-NC-2','US-NE-1','US-TX-3','US-WA-1'
+)
+
 if ($DataCenter -eq 'auto') {
-    # Confirm the GPU type is generally available globally.
+    # Confirm the GPU type is globally available.
     Log "Checking global availability for GPU '$GpuId'"
     $g = $null
     try {
@@ -150,42 +158,73 @@ if ($DataCenter -eq 'auto') {
         Log ("  {0}  available={1}  stockStatus={2}  secure={3}  community={4}" -f $g.displayName, $g.available, $g.stockStatus, $g.secureCloud, $g.communityCloud)
         if (-not $g.available) { Warn "Reported globally unavailable. Pod create may fail." }
     } else {
-        Warn "'$GpuId' not in runpodctl gpu list. Verify the exact id with: runpodctl gpu list"
+        Warn "'$GpuId' not in runpodctl gpu list. Verify with: runpodctl gpu list"
     }
 
-    # Walk datacenter list. Each DC has a gpuAvailability[] of { gpuId, stockStatus }.
+    # Walk datacenter list. Each DC has gpuAvailability[] of { gpuId, stockStatus }.
     Log "Scanning datacenters for stock"
     $dcList = @()
     try { $dcList = @((runpodctl datacenter list -o json 2>$null) | ConvertFrom-Json) } catch {}
 
-    $rank = @{ 'High' = 1; 'Medium' = 2; 'Low' = 3 }   # lower number sorts first
-    $candidates = @()
+    # Use a rank map to assign sort priority. Compute SortKey OUTSIDE the
+    # hashtable literal to avoid PS 5.1's quirks with `if` expressions inside
+    # hashtable values (which is suspected of corrupting earlier runs).
+    $rank = @{ 'High' = 1; 'Medium' = 2; 'Low' = 3 }
+    $candidates = New-Object System.Collections.ArrayList
     foreach ($dc in $dcList) {
         if (-not $dc.gpuAvailability) { continue }
         $entry = $dc.gpuAvailability | Where-Object { $_.gpuId -eq $GpuId } | Select-Object -First 1
         if (-not $entry) { continue }
         $status = $entry.stockStatus
-        if ([string]::IsNullOrWhiteSpace($status)) { continue }   # empty = no stock
+        if ([string]::IsNullOrWhiteSpace($status)) { continue }
         if ($status -eq 'Unavailable') { continue }
-        $candidates += [PSCustomObject]@{
-            Id       = $dc.id
-            Location = $dc.location
-            Stock    = $status
-            SortKey  = if ($rank.ContainsKey($status)) { $rank[$status] } else { 99 }
+
+        $sortKey = 99
+        if ($rank.ContainsKey($status)) { $sortKey = $rank[$status] }
+
+        # Skip DCs that don't support network volumes.
+        $supportsVolume = $VolumeSupportedDCs -contains $dc.id
+
+        $obj = [PSCustomObject]@{
+            Id              = [string]$dc.id
+            Location        = [string]$dc.location
+            Stock           = [string]$status
+            SortKey         = [int]$sortKey
+            SupportsVolume  = [bool]$supportsVolume
         }
+        [void]$candidates.Add($obj)
     }
 
-    if ($candidates.Count -eq 0) {
-        Warn "No datacenter is currently reporting stock for '$GpuId'."
+    $volumeCapable = @($candidates | Where-Object { $_.SupportsVolume })
+    if ($volumeCapable.Count -eq 0) {
+        Warn "No volume-capable datacenter is currently reporting stock for '$GpuId'."
         Warn "Run with -DataCenter <id> to override. Falling back to EU-RO-1."
         $DataCenter = 'EU-RO-1'
     } else {
-        $sorted = $candidates | Sort-Object SortKey, Id
-        Log "Candidate DCs (sorted High > Medium > Low):"
-        foreach ($c in $sorted) { Log ("  - {0,-10}  loc={1,-15}  stock={2}" -f $c.Id, $c.Location, $c.Stock) }
-        $DataCenter = $sorted[0].Id
+        $sorted = @($volumeCapable | Sort-Object SortKey, Id)
+        Log "Volume-capable candidate DCs (sorted High > Medium > Low):"
+        foreach ($c in $sorted) {
+            Log ("  - {0,-10}  loc={1,-15}  stock={2}" -f $c.Id, $c.Location, $c.Stock)
+        }
+        $DataCenter = [string]$sorted[0].Id
         Log "Picked: $DataCenter ($($sorted[0].Stock) stock)"
     }
+
+    # Also note non-volume-capable but high-stock DCs for context
+    $nonVolHighStock = @($candidates | Where-Object { -not $_.SupportsVolume -and $_.Stock -eq 'High' })
+    if ($nonVolHighStock.Count -gt 0) {
+        Log "FYI - these DCs have High stock but don't support network volumes:"
+        foreach ($c in $nonVolHighStock) { Log ("  (skipped) {0}  stock={1}" -f $c.Id, $c.Stock) }
+    }
+}
+
+# Sanity-check: $DataCenter must be a single id, not an array or space-joined string
+$DataCenter = ([string]$DataCenter).Trim()
+if ($DataCenter -match '\s' -or $DataCenter -match ',') {
+    Die "Internal bug: \$DataCenter contains whitespace or a comma: '$DataCenter'. Aborting before passing to runpodctl. Please paste this output."
+}
+if (-not ($DataCenter -match '^[A-Za-z0-9\-]+$')) {
+    Die "Internal bug: \$DataCenter looks malformed: '$DataCenter'. Aborting."
 }
 Log "Using DATA_CENTER_ID=$DataCenter"
 
@@ -241,28 +280,53 @@ Log "Creating pod: name=$PodName gpu=$GpuId x$GpuCount dc=$DataCenter"
 Log "  image=$PodImage"
 Log "  volume=$VolumeId mount=/workspace size=${VolumeSizeGB}GB"
 
-$podOut = (runpodctl pod create `
-    --name $PodName `
-    --cloud-type $CloudType `
-    --gpu-id $GpuId `
-    --gpu-count $GpuCount `
-    --container-disk-in-gb $ContainerDiskGB `
-    --data-center-ids $DataCenter `
-    --network-volume-id $VolumeId `
-    --volume-mount-path '/workspace' `
-    --image $PodImage `
-    --env $envJsonArg `
-    --ssh `
-    --ports '22/tcp' `
-    -o json 2>&1) | Out-String
+# Pod create with retry — RunPod stock fluctuates rapidly. Try up to 6 times
+# with 30s backoff before giving up. Any non-stock error fails fast.
+$PodId = $null
+$podOut = $null
+for ($attempt = 1; $attempt -le 6; $attempt++) {
+    if ($attempt -gt 1) {
+        Log "Retry attempt $attempt/6 after 30s backoff"
+        Start-Sleep -Seconds 30
+    }
+    $podOut = (runpodctl pod create `
+        --name $PodName `
+        --cloud-type $CloudType `
+        --gpu-id $GpuId `
+        --gpu-count $GpuCount `
+        --container-disk-in-gb $ContainerDiskGB `
+        --data-center-ids $DataCenter `
+        --network-volume-id $VolumeId `
+        --volume-mount-path '/workspace' `
+        --image $PodImage `
+        --env $envJsonArg `
+        --ssh `
+        --ports '22/tcp' `
+        -o json 2>&1) | Out-String
 
-try {
-    $pod = $podOut | ConvertFrom-Json
-    $PodId = $pod.id
-} catch {
-    Die "Pod create returned non-JSON: $podOut"
+    try {
+        $pod = $podOut | ConvertFrom-Json
+        if ($pod.id) { $PodId = $pod.id; break }
+    } catch {}
+
+    # If it's a stock/availability error, retry. Anything else, fail fast.
+    if ($podOut -match 'no longer any instances available' -or
+        $podOut -match 'no instances available' -or
+        $podOut -match 'capacity') {
+        Warn "Stock unavailable in $DataCenter on attempt $attempt. Will retry."
+        continue
+    }
+    Die "Pod create failed (attempt $attempt): $podOut"
 }
-if (-not $PodId) { Die "Pod create failed: $podOut" }
+
+if (-not $PodId) {
+    Warn "Pod create failed after 6 attempts. The DC '$DataCenter' has no H100 stock right now."
+    Warn "Options:"
+    Warn "  1. Wait and re-run later."
+    Warn "  2. Delete the network volume (runpodctl network-volume delete $VolumeId) and re-run; auto-pick may choose a DC with current stock."
+    Warn "  3. Manually pick another volume-supported DC: .\scripts\deploy.ps1 -DataCenter <id> (after deleting volume)."
+    Die "All retries exhausted: $podOut"
+}
 
 Log "Pod created: $PodId"
 Log "Waiting for pod to enter RUNNING status..."
