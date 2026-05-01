@@ -105,45 +105,39 @@ try {
     $volumeList = @((runpodctl network-volume list -o json 2>$null) | ConvertFrom-Json)
 } catch { $volumeList = @() }
 
-# Collect ALL matches by name. Use array indexing rather than Select-Object
-# -First 1 to defeat any pipeline-flattening surprises in PS 5.1.
+# Multiple volumes can share a name across different DCs — that's a valid
+# multi-region setup, not a conflict. We match by (name, DC). The DC may be
+# specified explicitly via -DataCenter, or chosen by auto-discovery below.
+function Get-VolumeDc {
+    param($Volume)
+    $dc = $Volume.dataCenterId
+    if (-not $dc) { $dc = $Volume.dataCenter }
+    if (-not $dc) { $dc = $Volume.location }
+    [string]$dc
+}
+
 $matchingVolumes = @($volumeList | Where-Object { $_.name -eq $VolumeName })
+$existingByDc = @{}
+foreach ($v in $matchingVolumes) {
+    $dc = Get-VolumeDc -Volume $v
+    if ($dc) { $existingByDc[$dc] = $v }
+}
+
+if ($matchingVolumes.Count -gt 0) {
+    Log "Found $($matchingVolumes.Count) existing volume(s) named '$VolumeName':"
+    foreach ($v in $matchingVolumes) {
+        Log ("  - id={0,-12}  dc={1}" -f $v.id, (Get-VolumeDc -Volume $v))
+    }
+}
+
 $VolumeId = $null
-
-if ($matchingVolumes.Count -eq 0) {
-    # No existing volume — we'll create one below after picking a DC.
-}
-elseif ($matchingVolumes.Count -gt 1) {
-    Warn "Found $($matchingVolumes.Count) volumes named '$VolumeName' from prior failed runs:"
-    foreach ($v in $matchingVolumes) {
-        $vDc = $v.dataCenterId; if (-not $vDc) { $vDc = $v.dataCenter }; if (-not $vDc) { $vDc = '?' }
-        Warn ("  - id={0,-12}  dc={1}" -f $v.id, $vDc)
-    }
-    Warn "Refusing to pick one automatically - these are orphans burning idle volume cost."
-    Warn "Clean up with:"
-    foreach ($v in $matchingVolumes) {
-        Warn ("  runpodctl network-volume delete {0}" -f $v.id)
-    }
-    Die "Multiple '$VolumeName' volumes exist. Delete all-but-one (or all and let the script create fresh), then re-run."
-}
-else {
-    $existingVolume = $matchingVolumes[0]
-    $VolumeId = [string]$existingVolume.id
-    $existingDc = $existingVolume.dataCenterId
-    if (-not $existingDc) { $existingDc = $existingVolume.dataCenter }
-    if (-not $existingDc) { $existingDc = $existingVolume.location }
-    $existingDc = [string]$existingDc
-
-    if ($existingDc) {
-        if ($DataCenter -ne 'auto' -and $DataCenter -ne $existingDc) {
-            Warn "Requested -DataCenter $DataCenter but the existing volume '$VolumeName' lives in $existingDc."
-            Warn "Network volumes can't move DCs. Either delete the volume and re-run, or use a different VolumeName."
-            Die "DC mismatch."
-        }
-        $DataCenter = $existingDc
-        Log "Reusing volume: $VolumeId (locked to DC: $DataCenter)"
+if ($DataCenter -ne 'auto') {
+    # Explicit DC: only reuse if there's a volume in THAT DC.
+    if ($existingByDc.ContainsKey($DataCenter)) {
+        $VolumeId = [string]$existingByDc[$DataCenter].id
+        Log "Reusing existing volume in $DataCenter`: $VolumeId"
     } else {
-        Log "Reusing volume: $VolumeId  (DC could not be read from JSON)"
+        Log "No existing '$VolumeName' in $DataCenter; will create one."
     }
 }
 
@@ -222,6 +216,14 @@ if ($DataCenter -eq 'auto') {
         }
         $DataCenter = [string]$sorted[0].Id
         Log "Picked: $DataCenter ($($sorted[0].Stock) stock)"
+    }
+
+    # After picking a DC, look for an existing $VolumeName volume in THAT DC
+    # only. Volumes named the same in other DCs may belong to other projects;
+    # we never reuse them.
+    if ($existingByDc.ContainsKey($DataCenter)) {
+        $VolumeId = [string]$existingByDc[$DataCenter].id
+        Log "Found existing '$VolumeName' in $DataCenter`: $VolumeId  (will reuse)"
     }
 
     # Also note non-volume-capable but high-stock DCs for context
