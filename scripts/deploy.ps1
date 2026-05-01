@@ -169,34 +169,51 @@ $VolumeSupportedDCs = @(
 
 if ($DataCenter -eq 'auto') {
     # Walk datacenter list. Each DC has gpuAvailability[] of { gpuId, stockStatus }.
-    # The DC scan is the source of truth; we don't pre-check gpu list.
+    # ConvertFrom-Json on this output has been collapsing the array into a
+    # wrapping object whose properties auto-project. Use JavaScriptSerializer
+    # which returns Object[] of Dictionary<string,object> reliably.
     Log "Scanning datacenters for stock of '$GpuId'"
+    $rawJson = (& runpodctl datacenter list -o json 2>$null) | Out-String
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+    $jss = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $jss.MaxJsonLength = 256MB
     $dcList = @()
-    try { $dcList = @((runpodctl datacenter list -o json 2>$null) | ConvertFrom-Json) } catch {}
+    try {
+        $parsed = $jss.DeserializeObject($rawJson)
+        if ($parsed -is [System.Collections.IList]) { $dcList = @($parsed) }
+        elseif ($parsed) { $dcList = @($parsed) }
+    } catch {
+        Warn "Failed to parse 'runpodctl datacenter list' JSON: $($_.Exception.Message)"
+    }
+    Log "  parsed $($dcList.Count) datacenters"
 
-    # Use a rank map to assign sort priority. Compute SortKey OUTSIDE the
-    # hashtable literal to avoid PS 5.1's quirks with `if` expressions inside
-    # hashtable values (which is suspected of corrupting earlier runs).
     $rank = @{ 'High' = 1; 'Medium' = 2; 'Low' = 3 }
     $candidates = New-Object System.Collections.ArrayList
     foreach ($dc in $dcList) {
-        if (-not $dc.gpuAvailability) { continue }
-        $entry = $dc.gpuAvailability | Where-Object { $_.gpuId -eq $GpuId } | Select-Object -First 1
+        # JSS gives Dictionary<string,object>; access via [key].
+        $dcId       = [string]$dc['id']
+        $dcLocation = [string]$dc['location']
+        $gpuAvail   = $dc['gpuAvailability']
+        if (-not $gpuAvail) { continue }
+
+        $entry = $null
+        foreach ($g in $gpuAvail) {
+            if ([string]$g['gpuId'] -eq $GpuId) { $entry = $g; break }
+        }
         if (-not $entry) { continue }
-        $status = $entry.stockStatus
+
+        $status = [string]$entry['stockStatus']
         if ([string]::IsNullOrWhiteSpace($status)) { continue }
         if ($status -eq 'Unavailable') { continue }
 
         $sortKey = 99
         if ($rank.ContainsKey($status)) { $sortKey = $rank[$status] }
-
-        # Skip DCs that don't support network volumes.
-        $supportsVolume = $VolumeSupportedDCs -contains $dc.id
+        $supportsVolume = $VolumeSupportedDCs -contains $dcId
 
         $obj = [PSCustomObject]@{
-            Id              = [string]$dc.id
-            Location        = [string]$dc.location
-            Stock           = [string]$status
+            Id              = $dcId
+            Location        = $dcLocation
+            Stock           = $status
             SortKey         = [int]$sortKey
             SupportsVolume  = [bool]$supportsVolume
         }
