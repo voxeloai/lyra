@@ -1,0 +1,5 @@
+# Force LF endings on shell scripts so they run on the Linux pod even when
+# committed from Windows. Without this, Git's autocrlf can leave CRLF in .sh
+# files which makes bash fail with "/bin/bash^M: bad interpreter".
+*.sh text eol=lf
+*.bash text eol=lf
