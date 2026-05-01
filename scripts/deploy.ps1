@@ -33,7 +33,7 @@ param(
     [int]    $VolumeSizeGB   = $(if ($env:VOLUME_SIZE_GB)  { [int]$env:VOLUME_SIZE_GB }  else { 300 }),
     [string] $GpuId          = $(if ($env:GPU_ID)          { $env:GPU_ID }          else { 'NVIDIA H100 80GB HBM3' }),
     [int]    $GpuCount       = $(if ($env:GPU_COUNT)       { [int]$env:GPU_COUNT }  else { 1 }),
-    [string] $PodImage       = $(if ($env:POD_IMAGE)       { $env:POD_IMAGE }       else { 'runpod/pytorch:2.7.1-py3.10-cuda12.8.0-devel-ubuntu22.04' }),
+    [string] $PodImage       = $(if ($env:POD_IMAGE)       { $env:POD_IMAGE }       else { 'runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404' }),
     [int]    $ContainerDiskGB= $(if ($env:CONTAINER_DISK_GB){ [int]$env:CONTAINER_DISK_GB } else { 50 }),
     [string] $DataCenter     = $(if ($env:DATA_CENTER_ID)  { $env:DATA_CENTER_ID }  else { 'auto' }),
     [ValidateSet('SECURE','COMMUNITY')]
