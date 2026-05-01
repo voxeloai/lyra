@@ -11,11 +11,12 @@ This is what you do once, in your browser and terminal, to bring the pod up. Aft
 runpodctl config --apiKey <paste-RunPod-key-here>          # writes ~/.runpod/config.toml
 
 # HuggingFace CLI auth (one-time, even if you don't use HF locally)
-huggingface-cli login                                      # writes ~/.cache/huggingface/token
+# Note: huggingface-cli is deprecated in huggingface-hub >=1.0; the new command is `hf`.
+hf auth login                                              # writes ~/.cache/huggingface/token
 
 # Verify
 runpodctl get pod                                          # should list pods (or empty list, no error)
-huggingface-cli whoami                                     # should print your HF username
+hf auth whoami                                             # should print your HF username
 ```
 
 You can confirm to architect that these passed without sharing the keys.

@@ -162,11 +162,19 @@ if [[ "${LYRA_DOWNLOAD_WEIGHTS}" = "1" ]]; then
             warn "HF_TOKEN not set — download may fail if the repo is gated."
         fi
         log "Step 8: downloading weights from ${HF_REPO_ID}"
-        pip install --quiet huggingface-hub
-        HF_HOME="${HF_CACHE_DIR}" huggingface-cli download \
-            "${HF_REPO_ID}" \
-            --include "${HF_INCLUDE_PATTERN}" \
-            --local-dir "${WEIGHTS_DIR}"
+        pip install --quiet "huggingface-hub>=1.13"
+        # huggingface-hub >=1 ships the `hf` CLI; older releases used huggingface-cli.
+        if command -v hf >/dev/null 2>&1; then
+            HF_HOME="${HF_CACHE_DIR}" hf download \
+                "${HF_REPO_ID}" \
+                --include "${HF_INCLUDE_PATTERN}" \
+                --local-dir "${WEIGHTS_DIR}"
+        else
+            HF_HOME="${HF_CACHE_DIR}" huggingface-cli download \
+                "${HF_REPO_ID}" \
+                --include "${HF_INCLUDE_PATTERN}" \
+                --local-dir "${WEIGHTS_DIR}"
+        fi
         touch "${WEIGHTS_SENTINEL}"
     else
         log "Step 8: weights sentinel exists, skipping download"
