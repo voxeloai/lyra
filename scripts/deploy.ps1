@@ -42,6 +42,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Force consistent native-arg passing across PS 5.1 and 7+. In Legacy mode
+# (the default), internal double quotes are stripped when calling .exe files
+# unless they are backslash-escaped. We escape the env JSON below to survive
+# this. Setting this here makes the script behave the same regardless of host.
+try { $PSNativeCommandArgumentPassing = 'Legacy' } catch {}
+
 function Log  { param($Msg) Write-Host "[deploy] $Msg" -ForegroundColor Cyan }
 function Warn { param($Msg) Write-Host "[deploy] $Msg" -ForegroundColor Yellow }
 function Die  { param($Msg) Write-Host "[deploy] $Msg" -ForegroundColor Red; exit 1 }
@@ -156,6 +162,12 @@ $envJson = @{
     PYTORCH_CUDA_ALLOC_CONF = 'expandable_segments:True'
 } | ConvertTo-Json -Compress
 
+# PowerShell's legacy native-arg passing strips double quotes from arguments
+# bound for external .exe files. Escape each `"` as `\"` so the runpodctl
+# process receives a literal double quote (PS removes the backslash, native
+# Go binary parses the result as valid JSON).
+$envJsonArg = $envJson -replace '"', '\"'
+
 # ─────────────────────────────────────────────────────────────
 # Create the pod
 # ─────────────────────────────────────────────────────────────
@@ -173,7 +185,7 @@ $podOut = (runpodctl pod create `
     --network-volume-id $VolumeId `
     --volume-mount-path '/workspace' `
     --image $PodImage `
-    --env $envJson `
+    --env $envJsonArg `
     --ssh `
     --ports '22/tcp' `
     -o json 2>&1) | Out-String
