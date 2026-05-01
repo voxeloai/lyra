@@ -105,25 +105,45 @@ try {
     $volumeList = @((runpodctl network-volume list -o json 2>$null) | ConvertFrom-Json)
 } catch { $volumeList = @() }
 
-$existingVolume = $volumeList | Where-Object { $_.name -eq $VolumeName } | Select-Object -First 1
+# Collect ALL matches by name. Use array indexing rather than Select-Object
+# -First 1 to defeat any pipeline-flattening surprises in PS 5.1.
+$matchingVolumes = @($volumeList | Where-Object { $_.name -eq $VolumeName })
 $VolumeId = $null
 
-if ($existingVolume) {
-    $VolumeId = $existingVolume.id
-    # Volume is pinned to its datacenter — the pod MUST run in the same one.
+if ($matchingVolumes.Count -eq 0) {
+    # No existing volume — we'll create one below after picking a DC.
+}
+elseif ($matchingVolumes.Count -gt 1) {
+    Warn "Found $($matchingVolumes.Count) volumes named '$VolumeName' from prior failed runs:"
+    foreach ($v in $matchingVolumes) {
+        $vDc = $v.dataCenterId; if (-not $vDc) { $vDc = $v.dataCenter }; if (-not $vDc) { $vDc = '?' }
+        Warn ("  - id={0,-12}  dc={1}" -f $v.id, $vDc)
+    }
+    Warn "Refusing to pick one automatically - these are orphans burning idle volume cost."
+    Warn "Clean up with:"
+    foreach ($v in $matchingVolumes) {
+        Warn ("  runpodctl network-volume delete {0}" -f $v.id)
+    }
+    Die "Multiple '$VolumeName' volumes exist. Delete all-but-one (or all and let the script create fresh), then re-run."
+}
+else {
+    $existingVolume = $matchingVolumes[0]
+    $VolumeId = [string]$existingVolume.id
     $existingDc = $existingVolume.dataCenterId
     if (-not $existingDc) { $existingDc = $existingVolume.dataCenter }
     if (-not $existingDc) { $existingDc = $existingVolume.location }
+    $existingDc = [string]$existingDc
+
     if ($existingDc) {
         if ($DataCenter -ne 'auto' -and $DataCenter -ne $existingDc) {
-            Warn "You requested -DataCenter $DataCenter but the existing volume '$VolumeName' lives in $existingDc."
-            Warn "Network volumes can't move datacenters. Either delete the volume and re-run, or rename the new pod via -PodName <other> + use a different VolumeName."
+            Warn "Requested -DataCenter $DataCenter but the existing volume '$VolumeName' lives in $existingDc."
+            Warn "Network volumes can't move DCs. Either delete the volume and re-run, or use a different VolumeName."
             Die "DC mismatch."
         }
         $DataCenter = $existingDc
         Log "Reusing volume: $VolumeId (locked to DC: $DataCenter)"
     } else {
-        Log "Reusing volume: $VolumeId  (DC could not be read from JSON; may need manual confirm)"
+        Log "Reusing volume: $VolumeId  (DC could not be read from JSON)"
     }
 }
 
