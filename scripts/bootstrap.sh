@@ -66,6 +66,12 @@ fi
 # shellcheck source=/dev/null
 source "${CONDA_DIR}/etc/profile.d/conda.sh"
 
+# Accept Anaconda channel ToS up-front — required since 2024 for
+# repo.anaconda.com/pkgs/main and /pkgs/r. Idempotent; safe to re-run.
+log "Accepting conda channel ToS (idempotent)"
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r    2>/dev/null || true
+
 # ─────────────────────────────────────────────────────────────
 # Step 2: conda env (once, on volume)
 # ─────────────────────────────────────────────────────────────
