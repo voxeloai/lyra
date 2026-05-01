@@ -35,24 +35,25 @@ cat ~/.ssh/id_runpod.pub
 
 Paste the **public** key into RunPod → Settings → SSH Public Keys.
 
-## 2a. (Recommended) — automated deploy via `scripts/deploy.sh`
+## 2a. (Recommended on Windows) — automated deploy via `scripts\deploy.ps1`
 
-This script calls `runpodctl` for you, creates the volume + pod, sets `HF_TOKEN` on the pod env, prints the SSH command. Idempotent on the volume; refuses to create duplicate pods.
+Native PowerShell script — no bash, no jq, no path translation. Calls `runpodctl` for you, creates the volume + pod, sets `HF_TOKEN` on the pod env, prints the SSH command. Idempotent on the volume; refuses to create duplicate pods.
 
 ```powershell
-# In your terminal (PowerShell or Git Bash). Set the two secrets ONCE per shell:
-$env:RUNPOD_API_KEY = "<paste-your-runpod-key>"
-$env:HF_TOKEN       = "<paste-your-hf-token>"
+# Cache the RunPod key once (persists in ~/.runpod/config.toml)
+runpodctl doctor                                  # paste key when prompted
 
-# Optional: cache the runpod key permanently (so future shells don't need it)
-runpodctl doctor
+# Per-session: HF_TOKEN in env. Never paste into chat.
+$env:HF_TOKEN = "<paste-your-hf-token>"
 
 # Run the deploy
 cd C:\Users\v.mulhem\Documents\AI\repos\lyra
-bash scripts/deploy.sh
+.\scripts\deploy.ps1
 ```
 
-The script picks the first datacenter with H100 SXM 80GB stock automatically. To override: `DATA_CENTER_ID=US-KS-2 bash scripts/deploy.sh`. Other env-var overrides documented at the top of `scripts/deploy.sh`.
+The script auto-discovers a datacenter with H100 SXM 80GB stock. To override: `.\scripts\deploy.ps1 -DataCenter EU-RO-1`. Other parameters at the top of the script.
+
+**On macOS / Linux / VM**, use `bash scripts/deploy.sh` instead — same behaviour, but written for POSIX (requires `jq`).
 
 If you'd rather click through the console, skip to step 2b below.
 
