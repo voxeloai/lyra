@@ -105,15 +105,29 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────
-# Step 3: CUDA toolkit via conda (once)
+# Step 3: CUDA — prefer the base image's system install if present.
+#
+# RunPod's pytorch base images ship a CUDA-devel install at /usr/local/cuda
+# (with nvcc + headers + libs). That's exactly what Lyra-2's build needs.
+# Installing CUDA via conda is only needed if there's no system install,
+# AND nvidia/label/cuda-12.8.0 has no Linux package as of 2026-05; only
+# 12.8.1+ does. Detect and use system path when available.
 # ─────────────────────────────────────────────────────────────
-if ! conda list -p "${ENV_DIR}" cuda 2>/dev/null | grep -q "^cuda "; then
-    log "Step 3: installing CUDA 12.8 toolkit via conda"
-    conda install -y -p "${ENV_DIR}" cuda -c nvidia/label/cuda-12.8.0
+SYSTEM_CUDA="/usr/local/cuda"
+if [[ -d "${SYSTEM_CUDA}" && -x "${SYSTEM_CUDA}/bin/nvcc" ]]; then
+    NVCC_VERSION=$("${SYSTEM_CUDA}/bin/nvcc" --version 2>/dev/null | grep -oP 'release \K[0-9.]+' || echo "?")
+    log "Step 3: using system CUDA at ${SYSTEM_CUDA}  (nvcc ${NVCC_VERSION})"
+    export CUDA_HOME="${SYSTEM_CUDA}"
 else
-    log "Step 3: CUDA toolkit present, skipping"
+    if ! conda list -p "${ENV_DIR}" cuda 2>/dev/null | grep -q "^cuda "; then
+        log "Step 3: no system CUDA found; installing via conda (nvidia/label/cuda-12.8.1)"
+        conda install -y -p "${ENV_DIR}" cuda -c nvidia/label/cuda-12.8.1
+    else
+        log "Step 3: CUDA toolkit present in conda env, skipping"
+    fi
+    export CUDA_HOME="${ENV_DIR}"
 fi
-export CUDA_HOME="${ENV_DIR}"
+log "  CUDA_HOME=${CUDA_HOME}"
 
 # ─────────────────────────────────────────────────────────────
 # Step 4: PyTorch
@@ -206,12 +220,13 @@ cat > "${ACTIVATE_SCRIPT}" <<EOF
 # Source after every pod start: \`source /workspace/activate.sh\`
 source ${CONDA_DIR}/etc/profile.d/conda.sh
 conda activate ${ENV_DIR}
-export CUDA_HOME=${ENV_DIR}
+export CUDA_HOME=${CUDA_HOME}
 SITE=\${CONDA_PREFIX}/lib/python${PYTHON_VERSION}/site-packages
 export CPATH="\${CUDA_HOME}/include:\${SITE}/nvidia/cudnn/include:\${SITE}/nvidia/nccl/include\${CPATH:+:\${CPATH}}"
-export LD_LIBRARY_PATH="\${CONDA_PREFIX}/lib:\${SITE}/torch/lib:\${SITE}/nvidia/cuda_runtime/lib:\${SITE}/nvidia/cudnn/lib\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH="\${CONDA_PREFIX}/lib:\${SITE}/torch/lib:\${SITE}/nvidia/cuda_runtime/lib:\${SITE}/nvidia/cudnn/lib:\${CUDA_HOME}/lib64\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
 export CC="\${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-gcc"
 export CXX="\${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++"
+export PATH="\${CUDA_HOME}/bin:\${PATH}"
 export HF_HOME=${HF_CACHE_DIR}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd ${REPO_DIR}/Lyra-2
