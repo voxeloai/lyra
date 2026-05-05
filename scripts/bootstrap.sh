@@ -165,6 +165,11 @@ pip install --no-deps -r "${REPO_DIR}/Lyra-2/requirements.txt"
 pip install "git+https://github.com/microsoft/MoGe.git"
 pip install --no-build-isolation "transformer_engine[pytorch]"
 
+# peft — optional but unlocks DMD 4-step distillation (--use_dmd flag).
+# Lyra's runtime warns "peft is not installed, Lora is not supported" without it.
+# Cheap install (~50 MB), pre-install so DMD path works in cycle 3.
+pip install --quiet peft
+
 # Symlink cudart → cuda_runtime (idempotent)
 ln -sf "${SITE}/nvidia/cuda_runtime" "${SITE}/nvidia/cudart"
 
