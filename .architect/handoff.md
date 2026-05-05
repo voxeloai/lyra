@@ -1,74 +1,69 @@
-# Cycle 1 — handoff
+# Cycles 2 + 3 — handoff
 
 **Date:** 2026-05-05
-**Closed by:** architect (Vlad's local + remote bootstrap, manual SSH in pod)
-**Cycle:** 1
-**Status:** `done`
+**Status:** `done` — pattern fully tested
+**Cycles:** 2 (kernel builds + weights) and 3 (actual inference) collapsed into one writeup since both ran in the same in-pod session.
 
 ## Summary
 
-Cycle 1 goal — get a healthy conda env on the persistent volume, surviving stop/start — passed. The pod can be stopped and restarted with the same volume attached and the env / Python / CUDA / GPU come back without any reinstall.
+Lyra-2 ran end-to-end on a RunPod H100 SXM pod with a persistent volume. Three videos generated from `assets/samples/04.png` using DMD 4-step distillation. Full deploy pipeline proven cycle 1 → 2 → 3 over 5 days (2026-05-01 to 2026-05-05). The `runpod-persistent-gpu-pod` pattern is now `tested` and the lessons are baked into the templates for the next repo.
 
-## What changed
+See `RECIPE.md` for the locked, reproducible procedure.
 
-- New `voxeloai/lyra` fork created; `voxelo/main` branch with `.architect/` coordination layer + `scripts/bootstrap.sh` + `scripts/deploy.ps1`.
-- `scripts/deploy.ps1` evolved through several iterations to handle: PowerShell native arg quoting (the `--env` JSON), Git-Bash vs WSL bash path translation, conda channel ToS, conda solver fights, multiple-volume name collisions across DCs, `runpodctl datacenter list -o json` parsed via `JavaScriptSerializer`.
-- `scripts/bootstrap.sh` evolved to: auto-accept Anaconda channel ToS, install + use libmamba solver, **detect and use the base image's `/usr/local/cuda`** instead of conda installing CUDA, write `activate.sh` with the detected CUDA_HOME baked in.
-- Pod created in **EU-RO-1** with volume `06dkw1b4rx` (300 GB, `lyra-workspace`). Pod name `lyra-2`. Image `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`.
-- Conda env at `/workspace/envs/lyra2`: Python 3.10.20, gcc 13.3.0, eigen, zlib (from conda-forge); PyTorch 2.7.1+cu128 + Lyra-2 `requirements.txt` deps + `MoGe` (git) + `transformer_engine[pytorch]` (from pip).
-- `CUDA_HOME=/usr/local/cuda` (system, base image; not conda).
+## Cycle 2 outcome
 
-## Verification (load-bearing test)
+- Flash Attention 2.6.3 built in env
+- VIPE editable install built (after submodule init)
+- Depth Anything 3 [gs] built (after pre-installing hatchling/pathspec/editables)
+- 91 GB of weights downloaded from `nvidia/Lyra-2.0`
+- All builds + weights survive a pod stop/start (load-bearing test passed in cycle 1, still proven for kernel binaries here)
+- `/workspace/.build-complete-v1` and `/workspace/.weights-complete` sentinels written
 
-Run after stop + start of the pod with the same volume:
+## Cycle 3 outcome
+
+- Inference command: `python -m lyra_2._src.inference.lyra2_zoomgs_inference --input_image_path assets/samples --sample_id 4 --experiment lyra2 --use_dmd --prompt "Cinematic 3D camera movement through the scene"` with `NVTE_FUSED_ATTN=0`
+- Total time: ~4 minutes on H100 (DMD 4-step distillation)
+- Output:
+  - `inference/lyra2_zoomgs/04/zoom_in.mp4` (81 frames)
+  - `inference/lyra2_zoomgs/04/zoom_out.mp4` (241 frames)
+  - `inference/lyra2_zoomgs/videos/04.mp4` (combined, 322 frames)
+
+## Issues encountered + fixed in cycles 2/3
+
+(All banked in `agent-architect/memory/playbook_repo_deploy.md`)
+
+1. Submodules — `vipe` and `depth_anything_3` directories empty without `--init --recursive`. Bootstrap now runs `git submodule update --init --recursive` defensively.
+2. Hatchling missing `pathspec` — DA3's `pip install -e --no-build-isolation` failed because `--no-build-isolation` uses the env's hatchling, but pathspec wasn't installed. Bootstrap now pre-installs `hatchling pathspec editables`.
+3. Weights at separate path — Lyra has hardcoded `checkpoints/...` relative paths but we put weights at `/workspace/weights/`. Bootstrap step 8a symlinks them.
+4. peft missing — non-fatal warning blocks `--use_dmd`. Pre-installed in step 5.
+5. `hf_transfer` required — base image sets `HF_HUB_ENABLE_HF_TRANSFER=1`; transformers downloads tokenizers at runtime. Pre-installed in step 5.
+6. Hydra `MissingConfigException` — script default `lyra_framepack_spatial` doesn't exist in the released configs. Pass `--experiment lyra2` (the only available).
+7. Caption source required — Lyra defaults to Gemini captioning. Pass `--prompt "<text>"` for smoke tests.
+8. **cuDNN sublibrary loading failure** — `transformer_engine` fused attention can't find cuDNN sublibs at runtime. Bypassed with `NVTE_FUSED_ATTN=0`. Proper fix not pursued (bypass is sufficient for inference, slight perf cost).
+
+## Sentinels in place on the volume
 
 ```
-which python                  → /workspace/envs/lyra2/bin/python
-python --version              → Python 3.10.20
-which nvcc                    → /usr/local/cuda/bin/nvcc
-echo $CUDA_HOME               → /usr/local/cuda
-python -c "import torch; ..." → torch: 2.7.1+cu128  cuda available: True  cuda version: 12.8
-import transformers + diffusers → OK
-nvidia-smi                    → H100 80GB visible, 0 GPU util, idle
+/workspace/.build-complete-v1     (touched after Flash Attention + VIPE + DA3 all built)
+/workspace/.weights-complete      (touched after HF download)
+/workspace/activate.sh            (sources conda, sets CUDA_HOME, exports paths)
+/workspace/envs/lyra2/            (full conda env, ~10 GB)
+/workspace/weights/checkpoints/   (six subdirs: image_encoder, lora, model, recon, text_encoder, vae; 91 GB)
+/workspace/lyra/                  (the repo with .architect/ + scripts/)
+/workspace/hf-cache/              (HF Hub cache for runtime tokenizer/model downloads)
 ```
 
-All seven gates passed both before and after a stop/start cycle. Pattern works.
+## Next steps (post-cycle-3)
 
-## What worked
+1. Pattern flips to `tested`. PATTERN.md updated, templates carry all the cycle 1-3 fixes.
+2. Vlad uses the pod for actual Lyra-2 experimentation. Pod stop/start works freely.
+3. `decisions/2026-05-05-runpod-pgpu-tested.md` logged in agent-architect.
+4. Bypass-conda v2 still pending — design exists, build the v2 skeleton and test on the next repo.
 
-- Detecting `/usr/local/cuda` from the base image and skipping the conda CUDA install. **This is the single biggest insight from cycle 1.** It eliminated four cascading conda failures (ToS, missing Linux package, classic-solver fights, libmamba `__win` virtual-package failure).
-- libmamba solver (installed in base) for the conda installs that did happen.
-- Auto-accepting Anaconda channel ToS at bootstrap start (idempotent).
-- Sentinel-gating expensive steps so re-runs are no-ops.
-- The activate.sh write at end of bootstrap, sourcing it after every fresh start.
+## Total time bank
 
-## What didn't (and how we fixed it)
+- 2026-05-01: deploy infrastructure (deploy.ps1 + scaffolding) — ~6 hours of debugging PowerShell quoting, JSS parsing, runpodctl quirks
+- 2026-05-05: bootstrap + cycles 2+3 — ~4 hours of debugging conda + transformer_engine + cudnn + Hydra + prompts
+- Total: ~3 calendar days, ~10 active engineering hours, all banked
 
-- `scripts/deploy.ps1`: many iterations on PowerShell quoting (env JSON), bash flavour path translation (Git Bash `/c/` vs WSL `/mnt/c/`), volume-name collision across DCs (multiple projects share name), datacenter list JSON parsing (`ConvertFrom-Json` in PS 5.1 collapsed the array). Ended up using `JavaScriptSerializer` for predictable parsing.
-- Initial pod image `runpod/pytorch:2.7.1-py3.10-cuda12.8.0-devel-ubuntu22.04` doesn't exist; switched to `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` (real RunPod template image).
-- `nvidia/label/cuda-12.8.0` channel has no Linux package — only Windows. Forced the bypass-conda-CUDA path.
-
-## Open questions for architect
-
-- **Cycle 2 / 3 plan:** kernel builds (Flash Attention 2.6.3 + VIPE + DA3) and weights download. These take 30+ min. Should pod-Claude (Claude Code on the pod) drive cycle 2, or continue the manual SSH-driven approach? The cycle protocol designed for in-pod Claude Code wasn't exercised in cycle 1.
-- **Bypass-conda v2:** decision logged at `Architect/decisions/2026-05-05-bypass-conda.md`. After Lyra-2 is fully working, build a v2 bootstrap skeleton that uses uv venv + apt + system CUDA, no conda at all. Test on the next repo deployed under this pattern.
-
-## Next-cycle suggestion
-
-**Cycle 2:** flip kernel builds and weights download on:
-
-```bash
-LYRA_BUILD_KERNELS=1 LYRA_DOWNLOAD_WEIGHTS=1 bash scripts/bootstrap.sh
-```
-
-Expected: ~30-40 min for Flash Attention build + VIPE + DA3 compile, plus HF download of `nvidia/Lyra-2.0` checkpoints (size unknown, expect tens of GB).
-
-Verification at end of cycle 2: full Lyra-2 import block passes, then run the quick inference command from upstream `INSTALL.md`. Stop/start again to confirm builds + weights survive.
-
-## Pointers
-
-- Log: `.architect/log/2026-05-05-cycle-01.md`
-- Bootstrap: `scripts/bootstrap.sh` (sentinel-gated, idempotent)
-- Activate: `/workspace/activate.sh` on the pod (written by bootstrap step 9)
-- Pattern doc: `Architect/patterns/runpod-persistent-gpu-pod/PATTERN.md`
-- Decision log: `Architect/decisions/2026-05-05-bypass-conda.md`
+Repo N+2 (next deploy under this pattern) target: cycle 1 in under 4 hours.
