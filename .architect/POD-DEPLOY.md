@@ -109,11 +109,16 @@ Once SSH'd in, on the pod:
 ls -la /workspace
 
 # Clone the Voxelo fork (HTTPS — no SSH key needed for this)
+# IMPORTANT: --recursive pulls Lyra-2's vipe and depth_anything_3 submodules,
+# which are required for the kernel build in cycle 2. Without --recursive,
+# bootstrap.sh now runs `git submodule update --init --recursive` defensively,
+# but cloning recursively is still cleaner.
 cd /workspace
-git clone https://github.com/voxeloai/lyra.git
+git clone --recursive https://github.com/voxeloai/lyra.git
 cd lyra
 git remote add upstream https://github.com/nv-tlabs/lyra.git
 git checkout voxelo/main
+git submodule update --init --recursive   # belt and braces in case any new submodules landed
 
 # Confirm HF_TOKEN is set (you set it as a pod env var in step 3.7)
 [[ -n "$HF_TOKEN" ]] && echo "HF_TOKEN is set" || echo "HF_TOKEN MISSING — fix in pod env"

@@ -130,6 +130,15 @@ fi
 log "  CUDA_HOME=${CUDA_HOME}"
 
 # ─────────────────────────────────────────────────────────────
+# Step 3a: ensure git submodules are populated (idempotent)
+# Lyra-2's vipe and depth_anything_3 are submodules under
+# lyra_2/_src/inference/. Without this, step 7's pip -e install fails
+# with 'neither setup.py nor pyproject.toml found'.
+# ─────────────────────────────────────────────────────────────
+log "Step 3a: ensuring submodules are initialised"
+( cd "${REPO_DIR}" && git submodule update --init --recursive )
+
+# ─────────────────────────────────────────────────────────────
 # Step 4: PyTorch
 # ─────────────────────────────────────────────────────────────
 if ! python -c "import torch; assert torch.__version__.startswith('2.7.1')" 2>/dev/null; then
