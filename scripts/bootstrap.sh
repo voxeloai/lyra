@@ -173,6 +173,14 @@ ln -sf "${SITE}/nvidia/cuda_runtime" "${SITE}/nvidia/cudart"
 # ─────────────────────────────────────────────────────────────
 if [[ "${LYRA_BUILD_KERNELS}" = "1" ]]; then
     if [[ ! -f "${BUILD_SENTINEL}" ]]; then
+        # When using --no-build-isolation, pip uses the env's installed build
+        # backends rather than fetching them in a temp env. DA3's pyproject.toml
+        # uses hatchling, which needs pathspec + editables to do editable
+        # installs. Pre-install them so the build doesn't fail on a missing
+        # transitive dep.
+        log "Step 6 prereqs: ensuring build backends (hatchling + deps) are present"
+        pip install --quiet hatchling pathspec editables
+
         log "Step 6: building Flash Attention 2.6.3 (this is the slow part)"
         MAX_JOBS=16 pip install --no-build-isolation --no-binary :all: flash-attn==2.6.3
 
