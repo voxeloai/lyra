@@ -121,14 +121,30 @@ fi
 # ─────────────────────────────────────────────────────────────
 # 5. Install kb-server (knowledge-base) and point at voxelo-brain
 # ─────────────────────────────────────────────────────────────
-if ! command -v node >/dev/null 2>&1; then
-    apt-get install -y nodejs npm
+# kb-server requires Node 20+; some RunPod base images ship Node 18.
+# Use NodeSource to install Node 20 system-wide. Idempotent.
+NODE_MAJOR=$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || echo "0")
+if [[ "${NODE_MAJOR}" -lt 20 ]]; then
+    log "Upgrading Node from v${NODE_MAJOR} to v20 (kb-server requires >=20)"
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+    log "Node now: $(node --version)"
 fi
 
 if [[ ! -d "${KB_DIR}" ]]; then
     log "Installing kb-server (willynikes2/knowledge-base-server)"
     git clone https://github.com/willynikes2/knowledge-base-server.git "${KB_DIR}"
     ( cd "${KB_DIR}" && npm install && npm link )
+elif [[ -d "${KB_DIR}/node_modules" ]]; then
+    # If kb-server was installed under an older Node, re-link with current Node
+    KB_NODE_MAJOR=$(grep -oP '"engines":\s*{[^}]*"node":\s*">=?\K[0-9]+' "${KB_DIR}/package.json" 2>/dev/null || echo "20")
+    CURRENT_NODE_MAJOR=$(node --version | sed -E 's/^v([0-9]+).*/\1/')
+    if [[ "${CURRENT_NODE_MAJOR}" -ge "${KB_NODE_MAJOR}" ]]; then
+        log "kb-server already installed (Node check OK)"
+    else
+        warn "Node ${CURRENT_NODE_MAJOR} < kb-server's required ${KB_NODE_MAJOR}. Re-linking."
+        ( cd "${KB_DIR}" && rm -rf node_modules && npm install && npm link )
+    fi
 fi
 log "kb-server CLI: $(command -v kb || echo 'check PATH')"
 
