@@ -208,6 +208,14 @@ fi
 # Step 8: Model weights (gated)
 # ─────────────────────────────────────────────────────────────
 if [[ "${LYRA_DOWNLOAD_WEIGHTS}" = "1" ]]; then
+    # Symlink so Lyra-2's hardcoded `checkpoints/...` relative paths resolve
+    # to our /workspace/weights/checkpoints/ data layout. Idempotent.
+    REPO_CHECKPOINTS="${REPO_DIR}/Lyra-2/checkpoints"
+    if [[ ! -e "${REPO_CHECKPOINTS}" ]]; then
+        log "Step 8a: linking ${REPO_CHECKPOINTS} -> ${WEIGHTS_DIR}/checkpoints"
+        ln -sfn "${WEIGHTS_DIR}/checkpoints" "${REPO_CHECKPOINTS}"
+    fi
+
     if [[ ! -f "${WEIGHTS_SENTINEL}" ]]; then
         if [[ -z "${HF_TOKEN:-}" ]]; then
             warn "HF_TOKEN not set — download may fail if the repo is gated."
