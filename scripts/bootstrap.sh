@@ -170,6 +170,12 @@ pip install --no-build-isolation "transformer_engine[pytorch]"
 # Cheap install (~50 MB), pre-install so DMD path works in cycle 3.
 pip install --quiet peft
 
+# hf_transfer — RunPod / many ML base images set HF_HUB_ENABLE_HF_TRANSFER=1
+# which makes huggingface-hub require this Rust-based fast downloader at
+# runtime. Inference paths that auto-download tokenizers/encoders blow up
+# without it. Tiny install, install always.
+pip install --quiet hf_transfer
+
 # Symlink cudart → cuda_runtime (idempotent)
 ln -sf "${SITE}/nvidia/cuda_runtime" "${SITE}/nvidia/cudart"
 
