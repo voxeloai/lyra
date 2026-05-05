@@ -1,76 +1,81 @@
-# Cycle 1 — task
+# Cycle 2 — task
 
-**Date:** 2026-05-01
+**Date:** 2026-05-05
 **Set by:** architect
-**Cycle:** 1
+**Cycle:** 2
 
 ## Goal
 
-Get the conda env and Python deps in place on the persistent volume, with PyTorch 2.7.1 + CUDA 12.8 working. **Stop before kernel builds (Flash Attention, VIPE, DA3) and weights download.** Those are cycle 2 and 3.
-
-The point of cycle 1: prove the volume mounts, the env activates correctly across pod restarts, the bootstrap script's first 5 sections run cleanly. We don't need a full inference run yet — we need a healthy env that survives stop/start.
+Build the custom CUDA kernels (Flash Attention 2.6.3, VIPE, Depth Anything 3) and download the `nvidia/Lyra-2.0` model weights. After this cycle, all the heavy artefacts live on the volume, and a stop/start cycle should still work.
 
 ## Verification
 
-After running `bash scripts/bootstrap.sh` (with `LYRA_BUILD_KERNELS=0` and `LYRA_DOWNLOAD_WEIGHTS=0`, which are the defaults) and sourcing `/workspace/activate.sh`:
+After running bootstrap with both phase flags on:
 
 ```bash
-which python                        # expect: /workspace/envs/lyra2/bin/python
-python --version                    # expect: Python 3.10.x
-python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
-                                    # expect: 2.7.1+cu128 True 12.8
-nvidia-smi                          # expect: H100 80GB visible, no errors
-echo $CUDA_HOME                     # expect: /workspace/envs/lyra2
-echo $CC                            # expect: ...x86_64-conda-linux-gnu-gcc
+LYRA_BUILD_KERNELS=1 LYRA_DOWNLOAD_WEIGHTS=1 bash scripts/bootstrap.sh
 ```
 
-Then **stop the pod, start a fresh pod with the same volume**, and re-run:
+(Expect ~30-40 min for kernel builds + weights download. Don't stop the pod mid-build.)
+
+Then source activate and run the upstream `INSTALL.md` verification block:
 
 ```bash
 source /workspace/activate.sh
-which python && python -c "import torch; print(torch.__version__)"
+PYTHONPATH=. python -c "
+import torch, flash_attn, transformer_engine.pytorch, vipe_ext, depth_anything_3.api, moge.model.v1
+print('torch:', torch.__version__, '| cuda:', torch.cuda.is_available())
+print('all imports OK')
+"
+PYTHONPATH=. python -m lyra_2._src.inference.lyra2_zoomgs_inference --help
+PYTHONPATH=. python -m lyra_2._src.inference.vipe_da3_gs_recon --help
 ```
 
-Expect: same outputs as before, no reinstall needed. **This is the load-bearing test.** If this fails, the persistent-volume pattern is broken; surface it clearly in the handoff.
+All three should run without errors.
+
+Then stop the pod, start it fresh, and re-run JUST:
+
+```bash
+source /workspace/activate.sh
+PYTHONPATH=. python -c "import flash_attn; import vipe_ext; import depth_anything_3.api; print('survived stop/start')"
+ls -lah /workspace/weights/
+```
+
+Both must work without re-running bootstrap.
 
 ## Scope
 
 **In scope:**
-- `scripts/bootstrap.sh` — fix anything that breaks during a real run
-- The conda env at `/workspace/envs/lyra2`
-- The activation script at `/workspace/activate.sh`
-- `.architect/log/` and `.architect/handoff.md`
+- `scripts/bootstrap.sh` — fix anything that breaks during kernel builds
+- The `/workspace/.build-complete-v1` sentinel — must be written only after ALL three kernels build successfully
+- The `/workspace/.weights-complete` sentinel — must be written only after the HF download completes
 
 **Out of scope:**
-- `LYRA_BUILD_KERNELS=1` — leave it 0 for cycle 1
-- `LYRA_DOWNLOAD_WEIGHTS=1` — same, 0
-- Any code in `Lyra-2/lyra_2/...` — don't touch upstream code yet
-- Any inference test — that's cycle 2/3
-- The pod's system config beyond what bootstrap step 0 does
+- Running actual inference on real data (cycle 3)
+- Code changes inside `Lyra-2/lyra_2/` upstream (don't touch unless explicitly debugging a build error)
+- Switching to bypass-conda — that's the v2 pattern, separate work
 
 ## Prior context
 
-This is cycle 1. The repo was just forked from `nv-tlabs/lyra` to `voxeloai/lyra`. INSTALL.md in `Lyra-2/INSTALL.md` is the upstream source of truth; `scripts/bootstrap.sh` is architect's idempotent + sentinel-gated wrapper around it.
+Cycle 1 (handoff: `.architect/handoff.md`, log: `.architect/log/2026-05-05-cycle-01.md`) proved the base env survives stop/start. CUDA_HOME is `/usr/local/cuda` (system); the conda env at `/workspace/envs/lyra2` has Python 3.10.20 + gcc 13.3 + PyTorch 2.7.1+cu128 + Lyra deps.
 
-The pattern this cycle is part of: `Architect/patterns/runpod-persistent-gpu-pod` (status: `proposed` until verification passes).
+Cycle 2 layers on the slow stuff. **Flash Attention 2.6.3** is built with `MAX_JOBS=16 pip install --no-build-isolation --no-binary :all: flash-attn==2.6.3`. **VIPE** is `pip install --no-build-isolation -e 'lyra_2/_src/inference/vipe'` with `USE_SYSTEM_EIGEN=1`. **Depth Anything 3** is `pip install --no-build-isolation -e 'lyra_2/_src/inference/depth_anything_3[gs]'`.
+
+These need: `nvcc` on PATH (yes, activate.sh adds `$CUDA_HOME/bin`), gcc 13.3 (in conda env), CUDA headers (yes, `$CUDA_HOME/include` in CPATH), eigen (in conda env via `eigen` package).
 
 ## Open questions
 
-- Does the RunPod base image (`runpod/pytorch:2.7.1-py3.10-cuda12.8.0-...` or whatever's available) include Miniconda already? If yes, bootstrap step 1 should detect and skip.
-- Is `apt-get update && apt-get install` even needed, or does the base image have everything? Profile this and trim if possible.
-- Any environment variables the RunPod base image sets that conflict with our exports? (`CUDA_HOME` in particular.)
-
-If any of these shift the design materially, write it to `handoff.md` so architect can update the pattern doc.
+- Is gcc 13.3 from conda compatible with CUDA 12.8.1's nvcc? Lyra tested gcc 13.3 + cuda 12.8.0; the system cuda is 12.8.1 (close enough most likely).
+- Will Flash Attention 2.6.3 take more than the default GitHub action timeout to build? Locally we can let it run as long as needed but watch the H100 burn rate ($2.99/hr × ~30 min build = ~$1.50).
+- Weights size for `nvidia/Lyra-2.0`: not documented. If it's >250 GB the 300 GB volume gets tight. Be prepared to expand the volume if `df -h /workspace` shows danger.
 
 ## Constraints
 
-- Don't exceed **2 GPU-hours** of compute on this cycle. If you hit that and the env still isn't healthy, stop and write `blocked` in handoff.
-- Don't enable `LYRA_BUILD_KERNELS=1` even if you finish early. Cycle 2 is for that.
-- Don't re-download weights even by accident.
-- Commit at meaningful checkpoints; don't lose work to disconnects.
+- **Cap GPU-time at 90 minutes** for this cycle. If kernel build + weights take longer, write `blocked` in handoff and surface what's slow.
+- **Don't change CUDA_HOME** mid-build (would invalidate the build).
+- **Push to `voxelo/main`** at meaningful checkpoints — don't let an hour of progress sit unpushed.
 
 ## Notes
 
-- Pod-Claude's persona is in `.architect/pod-claude/CLAUDE.md` — read it first.
-- The full cycle protocol is described in `.architect/README.md`.
-- Architect (local) will not see your edits in real-time. Push commits often.
+- Pod-Claude can drive this cycle from inside the pod if Vlad wants to test the cycle protocol end-to-end. Or continue manual SSH if simpler.
+- After cycle 2 lands, cycle 3 = run the actual inference quick test, then declare the pattern `tested` and write `RECIPE.md`.
