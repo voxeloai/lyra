@@ -80,17 +80,43 @@ if [[ ! -f "${REPO_DIR}/.claude/settings.local.json" ]]; then
 fi
 
 # ─────────────────────────────────────────────────────────────
-# 4. Clone continuity repos
+# 4. Clone continuity repos (private — needs gh auth on the pod)
 # ─────────────────────────────────────────────────────────────
-for repo in agent-architect voxelo-brain; do
-    if [[ ! -d "${WORKSPACE}/${repo}" ]]; then
-        log "Cloning ${repo}"
-        git clone "https://github.com/voxeloai/${repo}.git" "${WORKSPACE}/${repo}"
-    else
-        log "Updating ${repo}"
-        ( cd "${WORKSPACE}/${repo}" && git pull --ff-only 2>/dev/null || true )
-    fi
-done
+# Install gh CLI on the pod if missing
+if ! command -v gh >/dev/null 2>&1; then
+    log "Installing GitHub CLI (gh)"
+    type -p curl >/dev/null || apt-get install -y curl
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+    apt-get update -qq
+    apt-get install -y gh
+fi
+
+# Check if gh is authed; if not, skip private-repo clones gracefully
+if ! gh auth status >/dev/null 2>&1; then
+    warn "gh CLI is installed but not authenticated."
+    warn "To clone the continuity repos (private), run on the pod:"
+    warn "    gh auth login          # pick HTTPS + browser; paste device code"
+    warn "    bash $0                # re-run this script to finish"
+    warn "Continuing with the rest of the install — the pod will still work for"
+    warn "Lyra-2 inference, just without /workspace/agent-architect or /workspace/voxelo-brain."
+else
+    # Use gh's git credential helper so HTTPS clones use the OAuth token
+    gh auth setup-git 2>/dev/null || true
+    for repo in agent-architect voxelo-brain; do
+        if [[ ! -d "${WORKSPACE}/${repo}" ]]; then
+            log "Cloning ${repo} (via gh)"
+            gh repo clone "voxeloai/${repo}" "${WORKSPACE}/${repo}" || \
+                warn "Failed to clone ${repo}; check team membership or run 'gh auth login --scopes repo'"
+        else
+            log "Updating ${repo}"
+            ( cd "${WORKSPACE}/${repo}" && git pull --ff-only 2>/dev/null || true )
+        fi
+    done
+fi
 
 # ─────────────────────────────────────────────────────────────
 # 5. Install kb-server (knowledge-base) and point at voxelo-brain
@@ -118,10 +144,12 @@ EOF
     log "kb .env generated at ${KB_ENV_DIR}/.env (chmod 600)"
 fi
 
-# Initial ingest of the voxelo-brain into kb-server
-if command -v kb >/dev/null 2>&1; then
+# Initial ingest of the voxelo-brain into kb-server (only if the brain was cloned)
+if command -v kb >/dev/null 2>&1 && [[ -d "${WORKSPACE}/voxelo-brain" ]]; then
     log "Ingesting voxelo-brain into kb-server"
     kb ingest "${WORKSPACE}/voxelo-brain" || warn "kb ingest failed (may be fine if first-run UX needs interactive setup)"
+elif [[ ! -d "${WORKSPACE}/voxelo-brain" ]]; then
+    log "Skipping kb ingest: /workspace/voxelo-brain not yet cloned (run gh auth login + re-run script)"
 fi
 
 # ─────────────────────────────────────────────────────────────
