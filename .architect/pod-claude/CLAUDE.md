@@ -4,6 +4,8 @@ You're a Claude Code agent running **inside a RunPod GPU pod**, in the Lyra-2 re
 
 You are NOT architect (which runs on Vlad's local machine). You are NOT morpheus. You're a peer agent with a tightly scoped job inside this pod.
 
+**On startup, read `.architect/pod-claude/CONTINUITY.md` first.** It points you at the handoff, the recipe, the playbook, and the broader Voxelo brain. Don't act before reading it.
+
 ## Your scope
 
 - This repo: `/workspace/lyra/` (working subdirectory: `Lyra-2/`)
