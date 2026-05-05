@@ -33,11 +33,21 @@ warn() { printf '\033[1;33m[install]\033[0m %s\n' "$*" >&2; }
 # 1. Claude Code
 # ─────────────────────────────────────────────────────────────
 if ! command -v claude >/dev/null 2>&1; then
-    log "Installing Claude Code"
-    curl -fsSL https://claude.ai/code/install.sh | bash
-    export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+    log "Installing Claude Code (official native installer from docs.claude.com)"
+    # Official URL per https://code.claude.com/docs/en/setup (verified 2026-05).
+    # Native install lands at ~/.local/bin/claude, auto-updates in background.
+    if curl -fsSL https://claude.ai/install.sh | bash; then
+        true
+    else
+        log "Native installer failed; falling back to npm"
+        if ! command -v npm >/dev/null 2>&1; then
+            apt-get install -y nodejs npm
+        fi
+        npm install -g @anthropic-ai/claude-code
+    fi
+    export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/usr/local/bin:$PATH"
 fi
-log "Claude Code: $(command -v claude || echo 'not on PATH after install — open new shell')"
+log "Claude Code: $(command -v claude || echo 'not on PATH; try: source ~/.bashrc then re-run')"
 
 # ─────────────────────────────────────────────────────────────
 # 2. Persist Claude config to the volume so OAuth + history
