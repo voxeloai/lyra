@@ -1,63 +1,51 @@
-# Cycle 4 — task
+# Cycle 5 — task
 
 **Date:** 2026-05-06
 **Set by:** architect
-**Cycle:** 4
+**Cycle:** 5
 
 ## Goal
 
-Re-verify the cycle 3 inference recipe runs end-to-end on the AP-JP-1 migrated pod. This is the first real cycle driven by the new `pod-shell` SSH sub-agent (default mode as of 2026-05-06). Same input, same prompt, same expected outputs as cycle 3 — but now executed via tmux send-keys rather than an in-pod Claude.
+Fix the pod's git push auth gap that cycle 4 surfaced. After this cycle, pod-shell can `git push origin voxelo/main` directly from inside the pod, with no local-clone workaround.
+
+## Approach
+
+GitHub deploy key, scoped to `voxeloai/lyra`, write access. Keypair generated on the pod (private key never leaves the volume), public key handed to Vlad to add via the GitHub UI. Then switch the lyra repo's remote from HTTPS to SSH and verify push.
+
+## Steps
+
+1. Generate ed25519 keypair on the pod at `/workspace/.ssh-state/voxelo-lyra-deploy_ed25519`. Keypair lives on the persistent volume so it survives pod stop/start.
+2. Configure `git -C /workspace/lyra` with `core.sshCommand` pointing at the new key (with `IdentitiesOnly=yes` so it doesn't fall through to other identities). This setting lives in `.git/config` on the volume — also persistent.
+3. Print the public key. Hand to Vlad with instructions: paste into `https://github.com/voxeloai/lyra/settings/keys` → Add deploy key → name it `runpod-lyra-2-pod` → tick "Allow write access".
+4. Wait for Vlad's confirmation in chat ("added").
+5. Verify: `ssh -T git@github.com -i <key>` should return "Hi voxeloai/lyra! You've successfully authenticated...".
+6. Switch remote: `git remote set-url origin git@github.com:voxeloai/lyra.git`.
+7. Test push: write the cycle-5 handoff locally, commit, push from inside the pod. Push success is the load-bearing test for this cycle.
 
 ## Verification
 
-Run the locked inference command from `RECIPE.md`:
-
-```bash
-source /workspace/activate.sh
-cd /workspace/lyra/Lyra-2
-export NVTE_FUSED_ATTN=0
-PYTHONPATH=. python -m lyra_2._src.inference.lyra2_zoomgs_inference \
-    --input_image_path assets/samples \
-    --sample_id 4 \
-    --experiment lyra2 \
-    --use_dmd \
-    --prompt "Cinematic 3D camera movement through the scene"
-```
-
-Pass criteria:
-- Process exits 0 within 8 minutes wall clock.
-- Three video files produced at `inference/lyra2_zoomgs/04/`: `zoom_in.mp4`, `zoom_out.mp4`, and a combined output.
-- Each `.mp4` non-zero size and ffprobe-readable (frame count present).
+- `git push origin voxelo/main` from inside the pod completes without prompting for credentials.
+- After push, `git log origin/voxelo/main..HEAD` is empty (pod is in sync).
+- Re-fetched origin from local clone shows the new commits, no workaround needed.
 
 ## Scope
 
 **In scope:**
-- Driving the inference run via tmux on session `arch`.
-- Appending to `.architect/log/2026-05-06-cycle-04.md` continuously.
-- Writing `.architect/handoff.md` with status at cycle close.
-- Committing and pushing on `voxelo/main`.
+- Generating keypair on the pod (read-only on Vlad's GitHub side until step 3).
+- Configuring the lyra repo's git remote and ssh command.
+- Writing handoff + log + committing + pushing.
 
 **Out of scope:**
-- Any code edits in `Lyra-2/` source.
-- Re-downloading weights.
-- Touching `bootstrap.sh`, `RECIPE.md`, or anything in `.architect/pod-claude/` (autonomous-mode artefacts).
-- Modifying the upstream-tracking `main` branch.
-
-## Prior context
-
-Cycle 3 (2026-05-05) ran this exact command in ~4 min on the EU-RO-1 pod and produced three videos. See cycles 2+3 handoff in repo history. The volume was migrated to AP-JP-1 on 2026-05-06; the new pod (`whtrti3gc8nptl`) was deployed today. Smoke test (cycle-3 imports) passed earlier this session — env, weights, and CUDA stack are intact.
-
-## Open questions
-
-- Does ffprobe agree the videos are well-formed, or just that they exist?
-- Do file sizes land in the same ballpark as cycle 3 (we don't have those numbers logged precisely; record this run's sizes as the baseline going forward).
+- Modifying any GitHub repo's deploy keys (Vlad's action only — architect's permission posture forbids).
+- Generating the same key for `voxeloai/agent-architect` or `voxeloai/voxelo-brain` (separate cycle if needed).
+- Touching the pod's `/root/.ssh/authorized_keys` (that's the inbound RunPod-Key-Go, leave alone).
 
 ## Constraints
 
-- Hard cap: 8 GPU-minutes (cycle 3 took ~4 — anything over 8 means something regressed; abort and surface).
-- No new pip installs. Anything missing means env drift; surface it in handoff and stop.
-- No new pod creation. We're working inside the existing live pod.
+- Don't reuse the RunPod-Key-Go private key for outbound to GitHub. Separate key, separate purpose.
+- Don't print the private key anywhere — only the public key to chat.
+- Don't push anything from outside the pod after the keypair is wired up. The whole point is to prove the in-pod path.
 
 ## Notes
 
-This cycle is also a smoke test of pod-shell's discipline: drive long-running work through tmux, capture output incrementally, leave the tmux session intact at close, commit + push from the pod.
+If the deploy-key approach fails for any reason (org policy, etc.), fallback is a fine-grained PAT in a credential helper. But deploy keys are simpler and per-repo, so default to that.
