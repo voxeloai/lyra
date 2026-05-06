@@ -1,51 +1,44 @@
-# Cycle 5 — task
+# Cycle 6 — task
 
 **Date:** 2026-05-06
 **Set by:** architect
-**Cycle:** 5
+**Cycle:** 6
 
 ## Goal
 
-Fix the pod's git push auth gap that cycle 4 surfaced. After this cycle, pod-shell can `git push origin voxelo/main` directly from inside the pod, with no local-clone workaround.
+Make the cycle 5 git push fix durable across pod stop/start. Right now `/workspace/.ssh-state/pod_id_ed25519` is persistent but `/root/.ssh/pod_id_ed25519` (the chmod-enforced working copy SSH actually uses) is ephemeral. After a pod restart, `git push` will fail again until manually re-copied.
 
-## Approach
-
-GitHub deploy key, scoped to `voxeloai/lyra`, write access. Keypair generated on the pod (private key never leaves the volume), public key handed to Vlad to add via the GitHub UI. Then switch the lyra repo's remote from HTTPS to SSH and verify push.
-
-## Steps
-
-1. Generate ed25519 keypair on the pod at `/workspace/.ssh-state/voxelo-lyra-deploy_ed25519`. Keypair lives on the persistent volume so it survives pod stop/start.
-2. Configure `git -C /workspace/lyra` with `core.sshCommand` pointing at the new key (with `IdentitiesOnly=yes` so it doesn't fall through to other identities). This setting lives in `.git/config` on the volume — also persistent.
-3. Print the public key. Hand to Vlad with instructions: paste into `https://github.com/voxeloai/lyra/settings/keys` → Add deploy key → name it `runpod-lyra-2-pod` → tick "Allow write access".
-4. Wait for Vlad's confirmation in chat ("added").
-5. Verify: `ssh -T git@github.com -i <key>` should return "Hi voxeloai/lyra! You've successfully authenticated...".
-6. Switch remote: `git remote set-url origin git@github.com:voxeloai/lyra.git`.
-7. Test push: write the cycle-5 handoff locally, commit, push from inside the pod. Push success is the load-bearing test for this cycle.
+Extend `init-pod.sh` so sourcing it on a fresh boot recreates `/root/.ssh/pod_id_ed25519` (correct perms) and ensures `github.com` is in `/root/.ssh/known_hosts`.
 
 ## Verification
 
-- `git push origin voxelo/main` from inside the pod completes without prompting for credentials.
-- After push, `git log origin/voxelo/main..HEAD` is empty (pod is in sync).
-- Re-fetched origin from local clone shows the new commits, no workaround needed.
+The load-bearing test: simulate a post-boot state without doing a real stop/start (which is destructive to this session).
+
+1. Update `init-pod.sh` (both the live `/workspace/init-pod.sh` and the heredoc inside `scripts/install-pod-claude.sh` that generates it).
+2. Delete `/root/.ssh/pod_id_ed25519` and `/root/.ssh/known_hosts` (simulating fresh pod state).
+3. `source /workspace/init-pod.sh`.
+4. Verify: `/root/.ssh/pod_id_ed25519` exists with `0600` perms; `github.com` line in `/root/.ssh/known_hosts`.
+5. `ssh -T git@github.com` returns `Hi visualvlad!`.
+6. `git -C /workspace/lyra push --dry-run origin voxelo/main` succeeds (or a real push of the cycle 6 artefacts).
 
 ## Scope
 
 **In scope:**
-- Generating keypair on the pod (read-only on Vlad's GitHub side until step 3).
-- Configuring the lyra repo's git remote and ssh command.
-- Writing handoff + log + committing + pushing.
+- `voxeloai/lyra/scripts/install-pod-claude.sh` — heredoc that writes init-pod.sh
+- `/workspace/init-pod.sh` directly on the pod
+- Mirror into architect templates if the relevant skeleton exists.
 
 **Out of scope:**
-- Modifying any GitHub repo's deploy keys (Vlad's action only — architect's permission posture forbids).
-- Generating the same key for `voxeloai/agent-architect` or `voxeloai/voxelo-brain` (separate cycle if needed).
-- Touching the pod's `/root/.ssh/authorized_keys` (that's the inbound RunPod-Key-Go, leave alone).
+- Any change to the SSH key itself (cycle 5 already settled this).
+- Cleaning up old key copies (already done in cycle 5).
+- Touching the gh / claude / kb / nlm install logic (separate concern).
 
 ## Constraints
 
-- Don't reuse the RunPod-Key-Go private key for outbound to GitHub. Separate key, separate purpose.
-- Don't print the private key anywhere — only the public key to chat.
-- Don't push anything from outside the pod after the keypair is wired up. The whole point is to prove the in-pod path.
+- Idempotent: sourcing `init-pod.sh` twice in a row should not error.
+- No real pod stop/start during this cycle (would disrupt the session).
+- Don't change the key fingerprint or location — only the boot-time copy.
 
 ## Notes
 
-If the deploy-key approach fails for any reason (org policy, etc.), fallback is a fine-grained PAT in a credential helper. But deploy keys are simpler and per-repo, so default to that.
+After this cycle the cycle-5 fix is fully durable. The pattern's deploy playbook is honest about the SSH key being a one-time setup step, with no recurring "fix it again every restart" cost.
