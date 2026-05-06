@@ -197,6 +197,24 @@ _relink "${LOCAL_STATE}"  /root/.local
 _relink "${CONFIG_STATE}" /root/.config
 _relink "${CLAUDE_CONFIG}" /root/.claude
 
+# Restore SSH private key to /root/.ssh (chmod-enforced) from the persistent
+# /workspace/.ssh-state copy. MFS does not honour chmod 0600 on /workspace,
+# so SSH refuses to use a key kept there directly. Persistent source on
+# /workspace; chmod-enforced live working copy on /root/.ssh.
+SSH_KEY_SRC="${WORKSPACE}/.ssh-state/pod_id_ed25519"
+SSH_KEY_DST="/root/.ssh/pod_id_ed25519"
+if [ -f "$SSH_KEY_SRC" ]; then
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    if [ ! -f "$SSH_KEY_DST" ] || ! cmp -s "$SSH_KEY_SRC" "$SSH_KEY_DST"; then
+        cp "$SSH_KEY_SRC" "$SSH_KEY_DST"
+    fi
+    chmod 600 "$SSH_KEY_DST"
+    if ! grep -qE '^github\.com ' /root/.ssh/known_hosts 2>/dev/null; then
+        ssh-keyscan -t ed25519,rsa github.com 2>/dev/null >> /root/.ssh/known_hosts
+        sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts 2>/dev/null || true
+    fi
+fi
+
 # Ensure /root/.bashrc sources our profile-extras for future shells
 PROFILE_LINE='[ -f /workspace/.profile-extras ] && . /workspace/.profile-extras'
 if ! grep -qF "$PROFILE_LINE" /root/.bashrc 2>/dev/null; then
