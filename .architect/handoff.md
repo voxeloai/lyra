@@ -1,69 +1,57 @@
-# Cycles 2 + 3 — handoff
+# Cycle 4 — handoff
 
-**Date:** 2026-05-05
-**Status:** `done` — pattern fully tested
-**Cycles:** 2 (kernel builds + weights) and 3 (actual inference) collapsed into one writeup since both ran in the same in-pod session.
+**Date:** 2026-05-06
+**Status:** `done` (recipe verified; outputs not regenerated — see findings)
+**Cycle:** 4
+**Run by:** pod-shell (architect's SSH sub-agent, default mode as of 2026-05-06)
 
 ## Summary
 
-Lyra-2 ran end-to-end on a RunPod H100 SXM pod with a persistent volume. Three videos generated from `assets/samples/04.png` using DMD 4-step distillation. Full deploy pipeline proven cycle 1 → 2 → 3 over 5 days (2026-05-01 to 2026-05-05). The `runpod-persistent-gpu-pod` pattern is now `tested` and the lessons are baked into the templates for the next repo.
+First real cycle driven via SSH sub-agent (pod-shell) on the pivoted pod (`whtrti3gc8nptl` in AP-JP-1, volume `0oleomzwlz`). The locked cycle 3 inference command from `RECIPE.md` ran end-to-end with exit code 0 in ~14 min wall clock. The recipe still works.
 
-See `RECIPE.md` for the locked, reproducible procedure.
+## What changed
 
-## Cycle 2 outcome
+- Wrote `.architect/task.md` for cycle 4 (architect-side).
+- Drove the locked inference command (`PYTHONPATH=. python -m lyra_2._src.inference.lyra2_zoomgs_inference --input_image_path assets/samples --sample_id 4 --experiment lyra2 --use_dmd --prompt "Cinematic 3D camera movement through the scene"`) inside tmux session `arch` via a staged `/tmp/cycle4.sh` script (avoids quoting hell).
+- Inference loaded the model, set up the DA3 + MoGe + DMD pipeline, hit the script's idempotency guard, and exited cleanly.
 
-- Flash Attention 2.6.3 built in env
-- VIPE editable install built (after submodule init)
-- Depth Anything 3 [gs] built (after pre-installing hatchling/pathspec/editables)
-- 91 GB of weights downloaded from `nvidia/Lyra-2.0`
-- All builds + weights survive a pod stop/start (load-bearing test passed in cycle 1, still proven for kernel binaries here)
-- `/workspace/.build-complete-v1` and `/workspace/.weights-complete` sentinels written
+## Verification
 
-## Cycle 3 outcome
+- Process exit: **0**
+- Wall clock: ~14 min (started 09:58:41 UTC, finished 10:12:35 UTC)
+- Output side-effect: **none** — script detected existing `inference/lyra2_zoomgs/videos/04.mp4` from cycle 3 and skipped sampling. Existing files at `inference/lyra2_zoomgs/04/` (zoom_in.mp4, zoom_out.mp4, combined.mp4 etc.) are untouched, May 5 timestamps preserved.
+- `tmux session 'arch'`: still alive at cycle close.
 
-- Inference command: `python -m lyra_2._src.inference.lyra2_zoomgs_inference --input_image_path assets/samples --sample_id 4 --experiment lyra2 --use_dmd --prompt "Cinematic 3D camera movement through the scene"` with `NVTE_FUSED_ATTN=0`
-- Total time: ~4 minutes on H100 (DMD 4-step distillation)
-- Output:
-  - `inference/lyra2_zoomgs/04/zoom_in.mp4` (81 frames)
-  - `inference/lyra2_zoomgs/04/zoom_out.mp4` (241 frames)
-  - `inference/lyra2_zoomgs/videos/04.mp4` (combined, 322 frames)
+## What worked
 
-## Issues encountered + fixed in cycles 2/3
+- AP-JP-1 migrated volume is fully functional: 91 GB of weights + dcp model checkpoint + DA3 + MoGe all load.
+- Env activates cleanly via `/workspace/activate.sh`.
+- All cycle-3 imports + inference module reachable.
+- pod-shell's primitives (SSH for one-shots, tmux send-keys + capture-pane for long ops, stdin-piped script staging) all worked.
 
-(All banked in `agent-architect/memory/playbook_repo_deploy.md`)
+## What didn't work / findings
 
-1. Submodules — `vipe` and `depth_anything_3` directories empty without `--init --recursive`. Bootstrap now runs `git submodule update --init --recursive` defensively.
-2. Hatchling missing `pathspec` — DA3's `pip install -e --no-build-isolation` failed because `--no-build-isolation` uses the env's hatchling, but pathspec wasn't installed. Bootstrap now pre-installs `hatchling pathspec editables`.
-3. Weights at separate path — Lyra has hardcoded `checkpoints/...` relative paths but we put weights at `/workspace/weights/`. Bootstrap step 8a symlinks them.
-4. peft missing — non-fatal warning blocks `--use_dmd`. Pre-installed in step 5.
-5. `hf_transfer` required — base image sets `HF_HUB_ENABLE_HF_TRANSFER=1`; transformers downloads tokenizers at runtime. Pre-installed in step 5.
-6. Hydra `MissingConfigException` — script default `lyra_framepack_spatial` doesn't exist in the released configs. Pass `--experiment lyra2` (the only available).
-7. Caption source required — Lyra defaults to Gemini captioning. Pass `--prompt "<text>"` for smoke tests.
-8. **cuDNN sublibrary loading failure** — `transformer_engine` fused attention can't find cuDNN sublibs at runtime. Bypassed with `NVTE_FUSED_ATTN=0`. Proper fix not pursued (bypass is sufficient for inference, slight perf cost).
+1. **Cold-cache MFS load is ~14 min vs cycle 3's ~4 min on a warm pod.** First inference after a volume migration / fresh pod start pays a one-time read cost: model checkpoint loading from `mfs#ap-jp-1.runpod.net:9421` plus torch.compile() warm-up (32 inductor compile workers spawned). Subsequent runs on this pod should be back to cycle-3 speed. Worth banking in `RECIPE.md` as an expected first-run cost.
+2. **Inference is idempotent — skips when `inference/lyra2_zoomgs/videos/<id>.mp4` exists.** Not a bug; correct behaviour. To force a re-run, delete the existing combined video first or pass an overwrite flag (need to check upstream code).
+3. **Pod git push fails — pod has no GitHub credentials.** The cycle-4 task.md commit (`efd9797`) is local to the pod only; push returned `fatal: could not read Username for 'https://github.com'`. Pre-pivot install-pod-claude.sh solved this with `gh auth login`. The new SSH-sub-agent default needs a separate path: either gh auth on first pod boot, or switch the remote to SSH + GitHub-add-pod-key, or push via Vlad's local clone. Banking as a playbook gap (see open questions).
+4. **PowerShell → ssh → tmux send-keys quoting is fragile.** Spaces inside the prompt mangled the first attempt. Reliable workaround: stage the command in a `/tmp/<cycle>.sh` file via stdin heredoc, then `tmux send-keys "bash /tmp/<cycle>.sh" Enter`. This pattern should be added to `pod-shell.md` primitives.
+5. **`pgrep -f` inside outer heredocs can return spurious empty results.** Use `ps -p <pid>` against a known PID instead. Banking as a reliability note.
 
-## Sentinels in place on the volume
+## Open questions for architect
 
-```
-/workspace/.build-complete-v1     (touched after Flash Attention + VIPE + DA3 all built)
-/workspace/.weights-complete      (touched after HF download)
-/workspace/activate.sh            (sources conda, sets CUDA_HOME, exports paths)
-/workspace/envs/lyra2/            (full conda env, ~10 GB)
-/workspace/weights/checkpoints/   (six subdirs: image_encoder, lora, model, recon, text_encoder, vae; 91 GB)
-/workspace/lyra/                  (the repo with .architect/ + scripts/)
-/workspace/hf-cache/              (HF Hub cache for runtime tokenizer/model downloads)
-```
+- **How should pod git push auth work in default SSH-sub-agent mode?** Three options: (a) require `gh auth login` on first pod boot like the autonomous-mode path; (b) switch the pod's git remote to SSH (`git@github.com:voxeloai/lyra.git`) and add the pod's SSH key to GitHub; (c) have pod-shell write artefacts to the pod, then have architect (local) pull from the pod via scp + push from local. Recommend (b) — once-only setup, cleanest, no recurring auth.
+- **Should `RECIPE.md` document the cold-cache load time as an expected first-run cost?** I think yes.
+- **Should pod-shell's primitives section get the "stage script via stdin" pattern added?** Yes, banking now.
 
-## Next steps (post-cycle-3)
+## Next-cycle suggestion
 
-1. Pattern flips to `tested`. PATTERN.md updated, templates carry all the cycle 1-3 fixes.
-2. Vlad uses the pod for actual Lyra-2 experimentation. Pod stop/start works freely.
-3. `decisions/2026-05-05-runpod-pgpu-tested.md` logged in agent-architect.
-4. Bypass-conda v2 still pending — design exists, build the v2 skeleton and test on the next repo.
+Pick one:
+- **Cycle 5a:** Resolve push auth (option b above), then re-run cycle 4 to confirm push works end-to-end.
+- **Cycle 5b:** Force a re-generation of sample_id 4 (delete existing, re-run, compare file sizes to the May 5 baseline) to prove the cold-cache hot-path matches cycle 3.
+- **Cycle 5c:** Skip both; pattern is sufficiently re-verified. Move on to deploying a second repo under the pattern (the calibration target).
 
-## Total time bank
+I'd take 5a — push auth is a real blocker for any future cycle that needs to land artefacts on origin.
 
-- 2026-05-01: deploy infrastructure (deploy.ps1 + scaffolding) — ~6 hours of debugging PowerShell quoting, JSS parsing, runpodctl quirks
-- 2026-05-05: bootstrap + cycles 2+3 — ~4 hours of debugging conda + transformer_engine + cudnn + Hydra + prompts
-- Total: ~3 calendar days, ~10 active engineering hours, all banked
+## Log pointer
 
-Repo N+2 (next deploy under this pattern) target: cycle 1 in under 4 hours.
+Full event log: `.architect/log/2026-05-06-cycle-04.md`.
